@@ -13,7 +13,7 @@
   header{padding:12px 16px;border-bottom:1px solid #1e2533;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
   h1{font-size:16px;margin:0;color:#eaf2ff}
 
-  .wrap{display:grid;grid-template-columns:380px 1fr;gap:12px;height:calc(100vh - 60px)}
+  .wrap{display:grid;grid-template-columns:400px 1fr;gap:12px;height:calc(100vh - 60px)}
   .left{padding:12px;border-right:1px solid #1e2533;overflow-y:auto;overflow-x:hidden}
   .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px}
   .panel h2{font-size:14px;margin:0 0 8px;color:#cfe1ff}
@@ -38,6 +38,15 @@
   #sectorList .label{font-size:12px;color:#b9c3da}
   #sectorList .grow{flex:1 1 auto}
   #sectorList .btn-del{white-space:nowrap}
+
+  /* Lista de medidas (régua) */
+  #measureList .item{
+    display:flex; align-items:center; gap:8px;
+    padding:6px; border:1px solid #2a3954; border-radius:10px; margin-bottom:8px; background:#0b0f16;
+  }
+  #measureList .idx{width:36px;text-align:center;color:#cfe1ff;font-weight:600}
+  #measureList .val{font-size:12px;color:#b9c3da}
+  #measureList .grow{flex:1 1 auto}
 
   /* Área visual */
   #stage{position:relative;background:#0a0d14;height:100%;overflow:auto}
@@ -99,6 +108,16 @@
     </div>
 
     <div class="panel">
+      <h2>Régua</h2>
+      <div class="row">
+        <button id="btnMeasure">Medir distância</button>
+        <button id="btnClearMeasure">Limpar medidas</button>
+      </div>
+      <div class="small">Clique em dois pontos para medir. Use a rolagem para zoom e arraste para mover.</div>
+      <div id="measureList" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="panel">
       <h2>Zoom & Navegação</h2>
       <div class="row">
         <button id="zoomOut">Zoom −</button>
@@ -124,7 +143,7 @@
 <!-- PDF.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
-/* ===== util ===== */
+/* ================= util ================= */
 const $ = s => document.querySelector(s);
 const logEl = $('#log');
 function adjustLogScroll(){
@@ -138,21 +157,21 @@ function adjustLogScroll(){
   }
   logEl.scrollTop = logEl.scrollHeight;
 }
-function log(m){ logEl.textContent += '\n- ' + m; adjustLogScroll(); } // cada linha começa com "- "
+function log(m){ logEl.textContent += '\n- ' + m; adjustLogScroll(); }
 function toRad(d){return d*Math.PI/180}
 function toDeg(r){return r*180/Math.PI}
 function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 function normAz(d){ let x = ((d%360)+360)%360; return x; }
 
-/* ===== camadas ===== */
+/* ================= camadas ================= */
 const stage = $('#stage');
 const content = $('#content');
 const pdfCanvas = $('#pdfCanvas'); const pdfCtx = pdfCanvas.getContext('2d');
 const overlay = $('#overlay'); const ctx = overlay.getContext('2d');
 
-/* ===== base + zoom (HiDPI) ===== */
+/* ================= base + zoom (HiDPI) ================= */
 let baseW=1200, baseH=800, scale=1;
-let renderTimer = null; // debounce do render do PDF
+let renderTimer = null;
 function setBaseSize(w,h){ baseW=Math.max(1,Math.floor(w)); baseH=Math.max(1,Math.floor(h)); applyScale(true); }
 function applyScale(resetScroll=false){
   const dpr = window.devicePixelRatio || 1;
@@ -170,7 +189,7 @@ function applyScale(resetScroll=false){
   ctx.clearRect(0,0,overlay.width,overlay.height);
   ctx.setTransform(dpr,0,0,dpr,0,0);
 
-  // PDF: usa debounce para evitar flicker (fundo grafite) durante zoom rápido
+  // PDF com debounce (evita flicker/fundo grafite)
   if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
   renderTimer = setTimeout(()=>{ renderPdfAtScale(scale, dpr); }, 120);
 
@@ -183,7 +202,6 @@ $('#zoomIn').onclick  = ()=> zoomAtCenter(1.2);
 $('#zoomOut').onclick = ()=> zoomAtCenter(1/1.2);
 $('#zoomReset').onclick=()=>{ scale = 1; applyScale(true); };
 
-/* Zoom com rodinha */
 stage.addEventListener('wheel', (e)=>{
   e.preventDefault();
   const factor = (e.deltaY < 0) ? 1.12 : 1/1.12;
@@ -210,7 +228,7 @@ function zoomAtCursor(clientX, clientY, factor){
   stage.scrollTop  = Math.max(0, newPy - (clientY - sRect.top));
 }
 
-/* ===== pan (arrastar) — off nos modos de clique ===== */
+/* ================= pan ================= */
 let isPanning=false, panStart=null, scrollStart=null, suppressClick=false;
 overlay.addEventListener('mousedown', (e)=>{
   if (e.button!==0) return;
@@ -234,49 +252,45 @@ overlay.addEventListener('mousedown', (e)=>{
   document.addEventListener('mouseup', onUp);
 });
 
-/* ===== estados ===== */
+/* ================= estados ================= */
 const FIXED_RADIUS_KM = 4;
 const CIRCLE_COLOR = 'rgb(0,1,255)';
 const GREEN_ALPHA_FIXED = 0.2; // opacidade fixa 0,2
-let mode=null; // 'calibDist' | 'anchor' | 'insert225'
+let mode=null; // 'calibDist' | 'anchor' | 'insert225' | 'measure'
 let tempPtsBase=[]; let metersPerBasePx=null;
 let anchorBase=null; let showCircle=false;
 
-// Cada setor inserido guarda somente a orientação (bissetriz)
-let sectors225 = []; // [{bisAz: number}] — centrados sempre no anchorBase
+let sectors225 = []; // {bisAz}
+let measures = [];   // {a:{x,y}, b:{x,y}} em coords base
+let measureTemp = null; // primeiro ponto da régua (base)
+let lastMouseDisp = null; // para pré-visualização
 
-/* ===== PDF.js ===== */
+/* ================= PDF.js ================= */
 let currentPdfBuffer = null;
 let pdfDoc = null;
 let pdfPage = null;
-let renderTask = null; // controla a renderização atual do PDF
+let renderTask = null;
 
 async function loadPdfFromArrayBuffer(buf){
   if (!window['pdfjsLib']){ log('PDF.js não disponível.'); return; }
   if (!pdfjsLib.GlobalWorkerOptions.workerSrc){
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
-  const doc = await pdfjsLib.getDocument({data: buf}).promise;
-  pdfDoc = doc;
-  const page = await pdfDoc.getPage(1);
-  pdfPage = page;
-  const viewportBase = page.getViewport({scale:1});
+  pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
+  pdfPage = await pdfDoc.getPage(1);
+  const viewportBase = pdfPage.getViewport({scale:1});
   setBaseSize(viewportBase.width, viewportBase.height);
-  // Primeiro render sem debounce
   await renderPdfAtScale(scale, window.devicePixelRatio||1);
   log('PDF carregado e renderizado.');
 }
 
 async function renderPdfAtScale(s=1, dpr=1){
   const c = pdfCtx;
-
-  // Cancela render anterior se existir
   if (renderTask && typeof renderTask.cancel === 'function') {
     try { renderTask.cancel(); } catch(e) {}
     renderTask = null;
   }
-
-  // Limpa o canvas do PDF com fundo opaco (evita escurecer por sobreposição)
+  // limpar com fundo opaco para evitar escurecimento
   c.save();
   c.setTransform(1,0,0,1,0,0);
   c.globalAlpha = 1;
@@ -291,14 +305,11 @@ async function renderPdfAtScale(s=1, dpr=1){
   try {
     renderTask = pdfPage.render({canvasContext: c, viewport});
     await renderTask.promise;
-  } catch (err) {
-    // ignorar se foi cancelado por novo zoom
-  } finally {
-    renderTask = null;
-  }
+  } catch(e) { /* cancelado */ }
+  finally { renderTask = null; }
 }
 
-/* ===== arquivo (PDF apenas) ===== */
+/* ================= arquivo ================= */
 $('#resetAll').onclick = ()=>{
   const ok = confirm('Deseja realmente resetar? Isso removerá o PDF e todos os desenhos.');
   if (!ok){ log('Reset cancelado.'); return; }
@@ -309,18 +320,12 @@ function hardReset(){
   mode = null;
   overlay.classList.remove('cursor-xhair','grabbing');
 
-  // cancela render em andamento
-  if (renderTask && typeof renderTask.cancel === 'function') {
-    try { renderTask.cancel(); } catch(e) {}
-    renderTask = null;
-  }
+  if (renderTask && typeof renderTask.cancel === 'function') { try { renderTask.cancel(); } catch(e) {} renderTask=null; }
   if (renderTimer){ clearTimeout(renderTimer); renderTimer=null; }
 
   currentPdfBuffer=null; pdfDoc=null; pdfPage=null;
 
-  // limpar LOG e ajustar rolagem
-  logEl.textContent = '- Página resetada.';
-  adjustLogScroll();
+  logEl.textContent = '- Página resetada.'; adjustLogScroll();
 
   $('#file').value = '';
   const dpr = window.devicePixelRatio||1;
@@ -335,10 +340,11 @@ function hardReset(){
   overlay.width = Math.round(baseW*dpr); overlay.height = Math.round(baseH*dpr);
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0);
 
-  sectors225 = []; metersPerBasePx=null; tempPtsBase=[];
+  sectors225 = []; measures=[]; measureTemp=null; lastMouseDisp=null;
+  metersPerBasePx=null; tempPtsBase=[];
   anchorBase=null; showCircle=false;
   updateScaleStatus();
-  renderSectorList();
+  renderSectorList(); renderMeasureList();
 }
 
 $('#file').addEventListener('change', async e=>{
@@ -352,7 +358,7 @@ $('#file').addEventListener('change', async e=>{
   resetCalcs();
 });
 
-/* ===== helpers de escala/status ===== */
+/* ================= helpers de escala/status ================= */
 function updateScaleStatus(){
   $('#scaleStatus').textContent = metersPerBasePx ? 'definida' : 'não definida';
 }
@@ -364,7 +370,7 @@ function requireScaleOrAlert(){
   return true;
 }
 
-/* ===== calibração e círculo ===== */
+/* ================= calibração & círculo ================= */
 $('#btnCalibDist').onclick = ()=>{
   mode='calibDist'; tempPtsBase=[];
   overlay.classList.add('cursor-xhair');
@@ -381,6 +387,12 @@ $('#clearCircle').onclick = ()=>{
   redrawAll();
   log('Círculo removido.');
 };
+
+/* ================= eventos do overlay ================= */
+overlay.addEventListener('mousemove', (e)=>{
+  lastMouseDisp = pointerDisplay(e);
+  if (mode==='measure' && measureTemp){ redrawAll(); } // pré-visualização
+});
 
 overlay.addEventListener('click', (e)=>{
   if (suppressClick) return;
@@ -424,10 +436,28 @@ overlay.addEventListener('click', (e)=>{
     renderSectorList();
     mode=null; overlay.classList.remove('cursor-xhair');
     redrawAll();
+    return;
+  }
+
+  if (mode==='measure'){
+    if (!requireScaleOrAlert()) { mode=null; overlay.classList.remove('cursor-xhair'); return; }
+    if (!measureTemp){
+      measureTemp = {x:pBase.x, y:pBase.y};
+      log('Primeiro ponto da régua definido.');
+    } else {
+      measures.push({ a:{...measureTemp}, b:{x:pBase.x, y:pBase.y} });
+      const km = lengthKm(measureTemp, pBase);
+      log(`Medida inserida: ${formatDist(km)}.`);
+      measureTemp = null;
+      mode=null; overlay.classList.remove('cursor-xhair');
+      renderMeasureList();
+    }
+    redrawAll();
+    return;
   }
 });
 
-/* ===== Setor 22,5° ===== */
+/* ================= Setor 22,5° ================= */
 $('#btnInsert225').onclick = ()=>{
   if (!requireScaleOrAlert()) return;
   if (!anchorBase){ alert('Defina primeiro o centro do círculo.'); return; }
@@ -442,7 +472,6 @@ $('#btnClear225').onclick = ()=>{
   log('Todos os setores removidos.');
 };
 
-/* ===== LISTA DE SETORES (UI) ===== */
 function renderSectorList(){
   const list = $('#sectorList');
   list.innerHTML = '';
@@ -450,16 +479,11 @@ function renderSectorList(){
     const item = document.createElement('div');
     item.className = 'item';
 
-    const idx = document.createElement('div');
-    idx.className = 'idx';
-    idx.textContent = i+1;
+    const idx = document.createElement('div'); idx.className = 'idx'; idx.textContent = i+1;
 
-    const label = document.createElement('div');
-    label.className = 'label';
-    label.textContent = 'Bissetriz (°):';
+    const label = document.createElement('div'); label.className = 'label'; label.textContent = 'Bissetriz (°):';
 
-    const inp = document.createElement('input');
-    inp.type = 'number'; inp.step = '0.1'; inp.value = (Math.round(s.bisAz*10)/10);
+    const inp = document.createElement('input'); inp.type='number'; inp.step='0.1'; inp.value=(Math.round(s.bisAz*10)/10);
     inp.addEventListener('change', ()=>{
       s.bisAz = normAz(Number(inp.value)||0);
       inp.value = (Math.round(s.bisAz*10)/10);
@@ -469,9 +493,7 @@ function renderSectorList(){
 
     const filler = document.createElement('div'); filler.className='grow';
 
-    const del = document.createElement('button');
-    del.className = 'btn-del';
-    del.textContent = 'Excluir';
+    const del = document.createElement('button'); del.className='btn-del'; del.textContent='Excluir';
     del.addEventListener('click', ()=>{
       const rem = sectors225.splice(i,1);
       renderSectorList();
@@ -484,21 +506,60 @@ function renderSectorList(){
   });
 }
 
-/* ===== coord helpers ===== */
-function pointerDisplay(e){ const r = overlay.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
-function dispToBase(p){ return { x: p.x/scale, y: p.y/scale }; }
-function baseToDisp(p){ return { x: p.x*scale, y: p.y*scale }; }
-function drawMark(x,y){ ctx.save(); ctx.fillStyle='rgba(255,255,0,0.9)'; ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=1.1; ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.restore(); }
-function resetCalcs(){ metersPerBasePx=null; tempPtsBase=[]; updateScaleStatus(); const dpr=window.devicePixelRatio||1; ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0); sectors225=[]; anchorBase=null; showCircle=false; renderSectorList(); }
+/* ================= Régua ================= */
+$('#btnMeasure').onclick = ()=>{
+  if (!requireScaleOrAlert()) return;
+  mode='measure';
+  measureTemp=null;
+  overlay.classList.add('cursor-xhair');
+  log('Régua: clique o primeiro ponto e depois o segundo.');
+};
+$('#btnClearMeasure').onclick = ()=>{
+  measures = [];
+  measureTemp=null;
+  renderMeasureList();
+  redrawAll();
+  log('Todas as medidas foram removidas.');
+};
 
-/* ===== raios / conversões ===== */
-function radiusPxDisp(){ const rBase=(FIXED_RADIUS_KM*1000)/(metersPerBasePx||1); return rBase*scale; }
-function bearingToCanvasVec(deg, len){
-  const ang = (-Math.PI/2) + toRad(deg);
-  return { vx: Math.cos(ang)*len, vy: Math.sin(ang)*len };
+function renderMeasureList(){
+  const list = $('#measureList');
+  list.innerHTML = '';
+  measures.forEach((m, i)=>{
+    const km = lengthKm(m.a, m.b);
+    const item = document.createElement('div');
+    item.className = 'item';
+
+    const idx = document.createElement('div'); idx.className='idx'; idx.textContent = i+1;
+    const val = document.createElement('div'); val.className='val'; val.textContent = formatDist(km);
+
+    const filler = document.createElement('div'); filler.className='grow';
+
+    const del = document.createElement('button'); del.textContent='Excluir';
+    del.addEventListener('click', ()=>{
+      measures.splice(i,1);
+      renderMeasureList();
+      redrawAll();
+      log(`Medida ${i+1} removida.`);
+    });
+
+    item.append(idx, val, filler, del);
+    list.appendChild(item);
+  });
 }
 
-/* ===== download imagem (PDF + overlay em HiDPI) ===== */
+function lengthKm(a, b){
+  if (!metersPerBasePx) return 0;
+  const dBase = Math.hypot(b.x - a.x, b.y - a.y);
+  const meters = dBase * metersPerBasePx;
+  return meters / 1000;
+}
+function formatDist(km){
+  if (km >= 1) return `${km.toFixed(2)} km`;
+  return `${Math.round(km*1000)} m`;
+}
+
+/* ================= download imagem ================= */
 $('#downloadImg').onclick = async ()=>{
   const W = overlay.width, H = overlay.height;
   if (!W || !H){ log('Nada para exportar.'); return; }
@@ -523,53 +584,57 @@ $('#downloadImg').onclick = async ()=>{
   log(rendered ? 'Imagem exportada (PDF + desenhos, HiDPI).' : 'Imagem exportada (apenas desenhos, HiDPI).');
 };
 
-/* ===== desenho principal ===== */
+/* ================= desenho principal ================= */
 function redrawAll(){
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,overlay.width,overlay.height);
   ctx.setTransform(dpr,0,0,dpr,0,0);
 
+  // pontos temporários (calib)
   tempPtsBase.forEach(([bx,by])=>{ const p=baseToDisp({x:bx,y:by}); drawMark(p.x,p.y); });
 
-  // círculo de referência (se definido)
+  // círculo
   if (showCircle && anchorBase && metersPerBasePx){
     const rpx = radiusPxDisp();
     const a = baseToDisp(anchorBase);
     drawCircleAt(a.x, a.y, rpx, CIRCLE_COLOR);
   }
 
-  // desenhar todos os setores (todos com centro no anchorBase)
+  // setores 22,5° (4 fatias)
   if (metersPerBasePx && anchorBase && sectors225.length){
     const rpx = radiusPxDisp();
     const a = baseToDisp(anchorBase);
     const GREEN_ALPHA = GREEN_ALPHA_FIXED;
 
     sectors225.forEach(item=>{
-      const bis = item.bisAz;               // bissetriz do 90°
-      const bounds = [
-        normAz(bis - 45),
-        normAz(bis - 22.5),
-        normAz(bis),
-        normAz(bis + 22.5),
-        normAz(bis + 45)
-      ];
-
-      // 4 fatias verdes entre os 5 limites
+      const bis = item.bisAz;
+      const bounds = [normAz(bis-45), normAz(bis-22.5), normAz(bis), normAz(bis+22.5), normAz(bis+45)];
       for (let i=0;i<bounds.length-1;i++){
         drawWedgeAt(a.x, a.y, rpx, bounds[i], bounds[i+1], 'verde', GREEN_ALPHA);
       }
-
-      // linhas vermelhas e rótulos pretos
       for (let i=0;i<bounds.length;i++){
         drawRadialLine(a.x, a.y, rpx, bounds[i], 'rgba(255,0,0,0.95)', 2.2);
-        drawAzLabelAt(a.x, a.y, bounds[i], rpx + 12, '#000000'); // preto
+        drawAzLabelAt(a.x, a.y, bounds[i], rpx + 12, '#000000'); // rótulo preto
       }
     });
   }
+
+  // medidas fixas
+  if (metersPerBasePx && measures.length){
+    measures.forEach(m=>{
+      drawMeasureSegment(m.a, m.b);
+    });
+  }
+
+  // pré-visualização da régua
+  if (mode==='measure' && measureTemp && lastMouseDisp){
+    const p2 = dispToBase(lastMouseDisp);
+    drawMeasureSegment(measureTemp, p2, true);
+  }
 }
 
-/* ===== primitivos ===== */
+/* ================= primitivos ================= */
 function drawCircleAt(cx, cy, r, color){
   ctx.save();
   ctx.strokeStyle = color || 'rgb(0,1,255)';
@@ -579,7 +644,7 @@ function drawCircleAt(cx, cy, r, color){
   ctx.setLineDash([]); ctx.restore();
 }
 function drawWedgeAt(cx, cy, r, startDeg, endDeg, colorName, alpha){
-  // Azimute 0° = Norte (para cima), cresce no sentido horário.
+  // Azimute 0° = Norte (para cima), sentido horário.
   const start = (-Math.PI/2) + toRad(startDeg);
   let end = (-Math.PI/2) + toRad(endDeg);
   let delta = end - start; if (delta <= 0) delta += Math.PI*2;
@@ -595,17 +660,18 @@ function drawWedgeAt(cx, cy, r, startDeg, endDeg, colorName, alpha){
   ctx.closePath(); ctx.fill(); ctx.restore();
 }
 function drawRadialLine(cx, cy, r, deg, stroke='rgba(255,0,0,0.95)', lw=2){
-  const v = bearingToCanvasVec(deg, r);
+  const ang = (-Math.PI/2) + toRad(deg);
+  const vx = Math.cos(ang)*r, vy = Math.sin(ang)*r;
   ctx.save();
   ctx.strokeStyle = stroke;
   ctx.lineWidth = lw;
   ctx.beginPath();
   ctx.moveTo(cx, cy);
-  ctx.lineTo(cx + v.vx, cy + v.vy);
+  ctx.lineTo(cx + vx, cy + vy);
   ctx.stroke();
   ctx.restore();
 }
-function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){ // padrão: preto
+function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){
   const ang = (-Math.PI/2) + toRad(deg);
   const x = cx + Math.cos(ang)*rOut;
   const y = cy + Math.sin(ang)*rOut;
@@ -620,9 +686,76 @@ function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){ // padrão: pret
   ctx.restore();
 }
 
-/* inicializa ajuste do Log + lista */
+/* === primitivos da régua === */
+function drawMeasureSegment(aBase, bBase, preview=false){
+  const a = baseToDisp(aBase), b = baseToDisp(bBase);
+  const km = lengthKm(aBase, bBase);
+  const mid = { x:(a.x+b.x)/2, y:(a.y+b.y)/2 };
+
+  ctx.save();
+  ctx.lineWidth = 2.4;
+  ctx.strokeStyle = preview ? 'rgba(0,229,255,0.5)' : 'rgba(0,229,255,0.95)';
+  if (preview) ctx.setLineDash([6,6]);
+
+  // linha
+  ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+
+  // marcadores nas pontas
+  ctx.setLineDash([]);
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.beginPath(); ctx.arc(a.x,a.y,4,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(b.x,b.y,4,0,Math.PI*2); ctx.fill();
+
+  // rótulo (caixa clara + texto preto)
+  const label = formatDist(km);
+  const padX=6, padY=4;
+  ctx.font='bold 14px Arial, Helvetica, sans-serif';
+  const tw = ctx.measureText(label).width;
+  const th = 16;
+
+  // desloca um pouco ortogonal à linha
+  const vx = b.x-a.x, vy=b.y-a.y;
+  const len = Math.hypot(vx,vy)||1;
+  const nx = -vy/len, ny = vx/len; // normal
+  const off = 10;
+  const lx = mid.x + nx*off, ly = mid.y + ny*off;
+
+  // fundo
+  ctx.fillStyle = preview ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.85)';
+  roundRect(ctx, lx - tw/2 - padX, ly - th/2 - padY, tw + 2*padX, th + 2*padY, 6);
+  ctx.fill();
+
+  // texto
+  ctx.fillStyle = '#000';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label, lx, ly);
+
+  ctx.restore();
+}
+function roundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+/* ================= coord helpers ================= */
+function pointerDisplay(e){ const r = overlay.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function dispToBase(p){ return { x: p.x/scale, y: p.y/scale }; }
+function baseToDisp(p){ return { x: p.x*scale, y: p.y*scale }; }
+function drawMark(x,y){ ctx.save(); ctx.fillStyle='rgba(255,255,0,0.9)'; ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=1.1; ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.restore(); }
+function resetCalcs(){ metersPerBasePx=null; tempPtsBase=[]; updateScaleStatus(); const dpr=window.devicePixelRatio||1; ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0); sectors225=[]; measures=[]; measureTemp=null; anchorBase=null; showCircle=false; renderSectorList(); renderMeasureList(); }
+
+/* ================= raios/conversões ================= */
+function radiusPxDisp(){ const rBase=(FIXED_RADIUS_KM*1000)/(metersPerBasePx||1); return rBase*scale; }
+
+/* ================= init ================= */
 adjustLogScroll();
 renderSectorList();
+renderMeasureList();
 </script>
 </body>
 </html>
