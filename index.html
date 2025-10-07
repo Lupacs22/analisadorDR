@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Gerador de Setor de 22,5º e raio 4 km</title>
+<style>
+  :root { --bg:#0f1115; --fg:#e6e6e6; --muted:#9aa4b2; --panel:#1f2937; --border:#233147; }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;background:var(--bg);color:var(--fg);overflow-x:hidden}
+
+  header{padding:12px 16px;border-bottom:1px solid #1e2533;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  h1{font-size:16px;margin:0;color:#eaf2ff}
+
+  .wrap{display:grid;grid-template-columns:380px 1fr;gap:12px;height:calc(100vh - 60px)}
+  .left{padding:12px;border-right:1px solid #1e2533;overflow-y:auto;overflow-x:hidden}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px}
+  .panel h2{font-size:14px;margin:0 0 8px;color:#cfe1ff}
+  label{font-size:12px;color:#cfd8f5}
+
+  input[type="file"],button,input[type="number"]{
+    background:#0b0f16;color:#e6ecff;border:1px solid #233147;border-radius:10px;padding:8px 10px}
+  input[type="number"]{width:110px}
+  button{background:#101726;border:1px solid #2a3954;cursor:pointer;white-space:nowrap}
+  button:hover{border-color:#3a4f78}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;max-width:100%}
+  .small{font-size:12px;color:var(--muted)}
+  .sep{height:1px;background:#1b2230;margin:8px 0}
+
+  /* Lista de setores */
+  #sectorList .item{
+    display:flex; align-items:center; gap:8px;
+    padding:6px; border:1px solid #2a3954; border-radius:10px; margin-bottom:8px;
+    background:#0b0f16;
+  }
+  #sectorList .idx{width:36px;text-align:center;color:#cfe1ff;font-weight:600}
+  #sectorList .label{font-size:12px;color:#b9c3da}
+  #sectorList .grow{flex:1 1 auto}
+  #sectorList .btn-del{white-space:nowrap}
+
+  /* Área visual */
+  #stage{position:relative;background:#0a0d14;height:100%;overflow:auto}
+  #content{position:relative}
+  #layer-pdf,#layer-overlay{position:absolute;left:0;top:0;width:100%;height:100%}
+  #pdfCanvas{display:block;width:100%;height:100%;background:#11151f}
+  #overlay{display:block;width:100%;height:100%;cursor:grab}
+  #overlay.grabbing{cursor:grabbing}
+  #overlay.cursor-xhair{cursor:crosshair !important}
+
+  /* Log – quebra de linha + rolagem quando passar de 10 linhas */
+  #log{white-space:pre-wrap; overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<header>
+  <h1>Gerador de Setor de 22,5º e raio 4 km</h1>
+</header>
+
+<div class="wrap">
+  <div class="left">
+    <div class="panel">
+      <h2>Arquivo</h2>
+      <div class="row">
+        <input id="file" type="file" accept="application/pdf">
+        <button id="resetAll">Reset</button>
+        <button id="downloadImg">Baixar Imagem</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Calibração</h2>
+      <div class="row">
+        <button id="btnCalibDist">Calibrar por distância</button>
+        <span class="small">Clique 2 pontos e informe a distância real (km).</span>
+      </div>
+      <div class="sep"></div>
+      <div class="small">Escala: <span id="scaleStatus">não definida</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Círculo de Raio de 4 km</h2>
+      <div class="row">
+        <button id="btnAnchor">Definir centro</button>
+        <button id="clearCircle">Limpar círculo</button>
+      </div>
+      <div class="small">Define/limpa um círculo de referência (azul tracejado) em 4 km.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Setor de 22,5° e raio de 4 km</h2>
+      <div class="row">
+        <button id="btnInsert225">Inserir</button>
+        <button id="btnClear225">Limpar setores</button>
+      </div>
+      <div class="sep"></div>
+      <div class="small">Setores inseridos:</div>
+      <div id="sectorList"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Zoom & Navegação</h2>
+      <div class="row">
+        <button id="zoomOut">Zoom −</button>
+        <button id="zoomIn">Zoom +</button>
+        <button id="zoomReset">Reset</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Log</h2>
+      <pre id="log" class="small">- Pronto.</pre>
+    </div>
+  </div>
+
+  <div id="stage">
+    <div id="content" style="width:1200px;height:800px">
+      <div id="layer-pdf"><canvas id="pdfCanvas" width="1200" height="800"></canvas></div>
+      <div id="layer-overlay"><canvas id="overlay" width="1200" height="800"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- PDF.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+/* ===== util ===== */
+const $ = s => document.querySelector(s);
+const logEl = $('#log');
+function adjustLogScroll(){
+  const lines = logEl.textContent.split('\n').length;
+  if (lines > 10){
+    logEl.style.maxHeight = '220px';
+    logEl.style.overflowY = 'auto';
+  } else {
+    logEl.style.maxHeight = '';
+    logEl.style.overflowY = '';
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function log(m){ logEl.textContent += '\n- ' + m; adjustLogScroll(); } // cada linha começa com "- "
+function toRad(d){return d*Math.PI/180}
+function toDeg(r){return r*180/Math.PI}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function normAz(d){ let x = ((d%360)+360)%360; return x; }
+
+/* ===== camadas ===== */
+const stage = $('#stage');
+const content = $('#content');
+const pdfCanvas = $('#pdfCanvas'); const pdfCtx = pdfCanvas.getContext('2d');
+const overlay = $('#overlay'); const ctx = overlay.getContext('2d');
+
+/* ===== base + zoom (HiDPI) ===== */
+let baseW=1200, baseH=800, scale=1;
+let renderTimer = null; // debounce do render do PDF
+function setBaseSize(w,h){ baseW=Math.max(1,Math.floor(w)); baseH=Math.max(1,Math.floor(h)); applyScale(true); }
+function applyScale(resetScroll=false){
+  const dpr = window.devicePixelRatio || 1;
+  const Wcss = Math.round(baseW*scale), Hcss = Math.round(baseH*scale);
+  content.style.width = Wcss+'px';
+  content.style.height = Hcss+'px';
+
+  overlay.width   = Math.round(Wcss*dpr);
+  overlay.height  = Math.round(Hcss*dpr);
+  pdfCanvas.width = Math.round(Wcss*dpr);
+  pdfCanvas.height= Math.round(Hcss*dpr);
+
+  // Overlay
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  // PDF: usa debounce para evitar flicker (fundo grafite) durante zoom rápido
+  if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+  renderTimer = setTimeout(()=>{ renderPdfAtScale(scale, dpr); }, 120);
+
+  // Desenhos
+  redrawAll();
+
+  if (resetScroll){ stage.scrollLeft=0; stage.scrollTop=0; }
+}
+$('#zoomIn').onclick  = ()=> zoomAtCenter(1.2);
+$('#zoomOut').onclick = ()=> zoomAtCenter(1/1.2);
+$('#zoomReset').onclick=()=>{ scale = 1; applyScale(true); };
+
+/* Zoom com rodinha */
+stage.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const factor = (e.deltaY < 0) ? 1.12 : 1/1.12;
+  zoomAtCursor(e.clientX, e.clientY, factor);
+}, {passive:false});
+
+function zoomAtCenter(factor){
+  const rect = stage.getBoundingClientRect();
+  zoomAtCursor(rect.left + rect.width/2, rect.top + rect.height/2, factor);
+}
+function zoomAtCursor(clientX, clientY, factor){
+  const old = scale;
+  const ns = clamp(scale * factor, 0.1, 16);
+  if (ns === old) return;
+  const sRect = stage.getBoundingClientRect();
+  const pxDisp = stage.scrollLeft + (clientX - sRect.left);
+  const pyDisp = stage.scrollTop  + (clientY - sRect.top);
+  const baseX = pxDisp / old;
+  const baseY = pyDisp / old;
+  scale = ns;
+  applyScale(false);
+  const newPx = baseX * ns, newPy = baseY * ns;
+  stage.scrollLeft = Math.max(0, newPx - (clientX - sRect.left));
+  stage.scrollTop  = Math.max(0, newPy - (clientY - sRect.top));
+}
+
+/* ===== pan (arrastar) — off nos modos de clique ===== */
+let isPanning=false, panStart=null, scrollStart=null, suppressClick=false;
+overlay.addEventListener('mousedown', (e)=>{
+  if (e.button!==0) return;
+  if (mode) return;
+  isPanning=false;
+  panStart = {x:e.clientX, y:e.clientY};
+  scrollStart = {x:stage.scrollLeft, y:stage.scrollTop};
+  overlay.classList.add('grabbing');
+  const onMove = (ev)=>{
+    const dx = ev.clientX - panStart.x, dy = ev.clientY - panStart.y;
+    if (!isPanning && Math.hypot(dx,dy) > 3) isPanning=true;
+    if (isPanning){ stage.scrollLeft = scrollStart.x - dx; stage.scrollTop = scrollStart.y - dy; }
+  };
+  const onUp = ()=>{
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    overlay.classList.remove('grabbing');
+    if (isPanning){ suppressClick = true; setTimeout(()=> suppressClick=false, 80); }
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+/* ===== estados ===== */
+const FIXED_RADIUS_KM = 4;
+const CIRCLE_COLOR = 'rgb(0,1,255)';
+const GREEN_ALPHA_FIXED = 0.2; // opacidade fixa 0,2
+let mode=null; // 'calibDist' | 'anchor' | 'insert225'
+let tempPtsBase=[]; let metersPerBasePx=null;
+let anchorBase=null; let showCircle=false;
+
+// Cada setor inserido guarda somente a orientação (bissetriz)
+let sectors225 = []; // [{bisAz: number}] — centrados sempre no anchorBase
+
+/* ===== PDF.js ===== */
+let currentPdfBuffer = null;
+let pdfDoc = null;
+let pdfPage = null;
+let renderTask = null; // controla a renderização atual do PDF
+
+async function loadPdfFromArrayBuffer(buf){
+  if (!window['pdfjsLib']){ log('PDF.js não disponível.'); return; }
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc){
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+  const doc = await pdfjsLib.getDocument({data: buf}).promise;
+  pdfDoc = doc;
+  const page = await pdfDoc.getPage(1);
+  pdfPage = page;
+  const viewportBase = page.getViewport({scale:1});
+  setBaseSize(viewportBase.width, viewportBase.height);
+  // Primeiro render sem debounce
+  await renderPdfAtScale(scale, window.devicePixelRatio||1);
+  log('PDF carregado e renderizado.');
+}
+
+async function renderPdfAtScale(s=1, dpr=1){
+  const c = pdfCtx;
+
+  // Cancela render anterior se existir
+  if (renderTask && typeof renderTask.cancel === 'function') {
+    try { renderTask.cancel(); } catch(e) {}
+    renderTask = null;
+  }
+
+  // Limpa o canvas do PDF com fundo opaco (evita escurecer por sobreposição)
+  c.save();
+  c.setTransform(1,0,0,1,0,0);
+  c.globalAlpha = 1;
+  c.globalCompositeOperation = 'source-over';
+  c.fillStyle = '#11151f';
+  c.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
+  c.restore();
+
+  if (!pdfPage) return;
+
+  const viewport = pdfPage.getViewport({scale: s * dpr});
+  try {
+    renderTask = pdfPage.render({canvasContext: c, viewport});
+    await renderTask.promise;
+  } catch (err) {
+    // ignorar se foi cancelado por novo zoom
+  } finally {
+    renderTask = null;
+  }
+}
+
+/* ===== arquivo (PDF apenas) ===== */
+$('#resetAll').onclick = ()=>{
+  const ok = confirm('Deseja realmente resetar? Isso removerá o PDF e todos os desenhos.');
+  if (!ok){ log('Reset cancelado.'); return; }
+  hardReset();
+};
+
+function hardReset(){
+  mode = null;
+  overlay.classList.remove('cursor-xhair','grabbing');
+
+  // cancela render em andamento
+  if (renderTask && typeof renderTask.cancel === 'function') {
+    try { renderTask.cancel(); } catch(e) {}
+    renderTask = null;
+  }
+  if (renderTimer){ clearTimeout(renderTimer); renderTimer=null; }
+
+  currentPdfBuffer=null; pdfDoc=null; pdfPage=null;
+
+  // limpar LOG e ajustar rolagem
+  logEl.textContent = '- Página resetada.';
+  adjustLogScroll();
+
+  $('#file').value = '';
+  const dpr = window.devicePixelRatio||1;
+
+  baseW=1200; baseH=800; scale=1;
+  content.style.width = baseW+'px'; content.style.height = baseH+'px';
+  stage.scrollLeft=0; stage.scrollTop=0;
+
+  pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
+  pdfCtx.setTransform(1,0,0,1,0,0); pdfCtx.fillStyle='#11151f'; pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
+
+  overlay.width = Math.round(baseW*dpr); overlay.height = Math.round(baseH*dpr);
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  sectors225 = []; metersPerBasePx=null; tempPtsBase=[];
+  anchorBase=null; showCircle=false;
+  updateScaleStatus();
+  renderSectorList();
+}
+
+$('#file').addEventListener('change', async e=>{
+  const f=e.target.files?.[0]; if(!f) return;
+  const isPdf = (f.type==='application/pdf') || ((f.name.split('.').pop()||'').toLowerCase()==='pdf');
+  if (!isPdf){ alert('Apenas arquivos PDF são permitidos.'); $('#file').value=''; return; }
+  currentPdfBuffer = await f.arrayBuffer().catch(()=>null);
+  if (!currentPdfBuffer){ log('Falha ao ler o arquivo.'); return; }
+  try{ await loadPdfFromArrayBuffer(currentPdfBuffer); }
+  catch(err){ log('Erro ao abrir o PDF.'); console.error(err); }
+  resetCalcs();
+});
+
+/* ===== helpers de escala/status ===== */
+function updateScaleStatus(){
+  $('#scaleStatus').textContent = metersPerBasePx ? 'definida' : 'não definida';
+}
+function requireScaleOrAlert(){
+  if (!metersPerBasePx){
+    alert('Defina a escala por distância primeiro.');
+    return false;
+  }
+  return true;
+}
+
+/* ===== calibração e círculo ===== */
+$('#btnCalibDist').onclick = ()=>{
+  mode='calibDist'; tempPtsBase=[];
+  overlay.classList.add('cursor-xhair');
+  log('Calibrar por distância: clique 2 pontos e informe a distância real (km).');
+};
+$('#btnAnchor').onclick = ()=>{
+  if (!requireScaleOrAlert()) return;
+  mode='anchor';
+  overlay.classList.add('cursor-xhair');
+  log('Clique para definir o centro do círculo (4 km).');
+};
+$('#clearCircle').onclick = ()=>{
+  anchorBase=null; showCircle=false;
+  redrawAll();
+  log('Círculo removido.');
+};
+
+overlay.addEventListener('click', (e)=>{
+  if (suppressClick) return;
+  const pDisp = pointerDisplay(e); const pBase = dispToBase(pDisp);
+
+  if (mode==='calibDist'){
+    tempPtsBase.push([pBase.x,pBase.y]); drawMark(pDisp.x,pDisp.y);
+    if (tempPtsBase.length===2){
+      const km = Number(prompt('Distância real entre os pontos (km):','3'));
+      if(!km||km<=0){ log('Calibração cancelada.'); tempPtsBase=[]; overlay.classList.remove('cursor-xhair'); redrawAll(); return; }
+      const [a,b]=tempPtsBase; const dBase = Math.hypot(b[0]-a[0], b[1]-a[1]);
+      metersPerBasePx = (km*1000)/dBase;
+      log('Calibração concluída.');
+      updateScaleStatus();
+      tempPtsBase=[]; mode=null; overlay.classList.remove('cursor-xhair'); redrawAll();
+    }
+    return;
+  }
+
+  if (mode==='anchor'){
+    anchorBase = {x:pBase.x, y:pBase.y};
+    showCircle = true;
+    mode=null; overlay.classList.remove('cursor-xhair');
+    redrawAll();
+    log('Centro do círculo definido.');
+    return;
+  }
+
+  if (mode==='insert225'){
+    if (!requireScaleOrAlert()) { mode=null; overlay.classList.remove('cursor-xhair'); return; }
+    if (!anchorBase){ alert('Defina primeiro o centro do círculo.'); mode=null; overlay.classList.remove('cursor-xhair'); return; }
+
+    // Azimute da linha centro -> clique (0° = norte, sentido horário)
+    const dx = pBase.x - anchorBase.x;
+    const dy = pBase.y - anchorBase.y; // y para baixo
+    const rad = Math.atan2(dy, dx) + Math.PI/2;
+    const bisAz = normAz(toDeg(rad));
+
+    sectors225.push({bisAz});
+    log(`Setor 90° (4 × 22,5°) inserido com bissetriz em ${bisAz.toFixed(1)}°.`);
+    renderSectorList();
+    mode=null; overlay.classList.remove('cursor-xhair');
+    redrawAll();
+  }
+});
+
+/* ===== Setor 22,5° ===== */
+$('#btnInsert225').onclick = ()=>{
+  if (!requireScaleOrAlert()) return;
+  if (!anchorBase){ alert('Defina primeiro o centro do círculo.'); return; }
+  mode='insert225';
+  overlay.classList.add('cursor-xhair');
+  log('Clique no mapa para orientar a bissetriz do setor 90° (4 × 22,5°).');
+};
+$('#btnClear225').onclick = ()=>{
+  sectors225 = [];
+  renderSectorList();
+  redrawAll();
+  log('Todos os setores removidos.');
+};
+
+/* ===== LISTA DE SETORES (UI) ===== */
+function renderSectorList(){
+  const list = $('#sectorList');
+  list.innerHTML = '';
+  sectors225.forEach((s, i)=>{
+    const item = document.createElement('div');
+    item.className = 'item';
+
+    const idx = document.createElement('div');
+    idx.className = 'idx';
+    idx.textContent = i+1;
+
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = 'Bissetriz (°):';
+
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = '0.1'; inp.value = (Math.round(s.bisAz*10)/10);
+    inp.addEventListener('change', ()=>{
+      s.bisAz = normAz(Number(inp.value)||0);
+      inp.value = (Math.round(s.bisAz*10)/10);
+      redrawAll();
+      log(`Setor ${i+1} atualizado para bissetriz ${s.bisAz.toFixed(1)}°.`);
+    });
+
+    const filler = document.createElement('div'); filler.className='grow';
+
+    const del = document.createElement('button');
+    del.className = 'btn-del';
+    del.textContent = 'Excluir';
+    del.addEventListener('click', ()=>{
+      const rem = sectors225.splice(i,1);
+      renderSectorList();
+      redrawAll();
+      if (rem.length) log(`Setor ${i+1} removido (bissetriz ${rem[0].bisAz.toFixed(1)}°).`);
+    });
+
+    item.append(idx, label, inp, filler, del);
+    list.appendChild(item);
+  });
+}
+
+/* ===== coord helpers ===== */
+function pointerDisplay(e){ const r = overlay.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function dispToBase(p){ return { x: p.x/scale, y: p.y/scale }; }
+function baseToDisp(p){ return { x: p.x*scale, y: p.y*scale }; }
+function drawMark(x,y){ ctx.save(); ctx.fillStyle='rgba(255,255,0,0.9)'; ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=1.1; ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.restore(); }
+function resetCalcs(){ metersPerBasePx=null; tempPtsBase=[]; updateScaleStatus(); const dpr=window.devicePixelRatio||1; ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0); sectors225=[]; anchorBase=null; showCircle=false; renderSectorList(); }
+
+/* ===== raios / conversões ===== */
+function radiusPxDisp(){ const rBase=(FIXED_RADIUS_KM*1000)/(metersPerBasePx||1); return rBase*scale; }
+function bearingToCanvasVec(deg, len){
+  const ang = (-Math.PI/2) + toRad(deg);
+  return { vx: Math.cos(ang)*len, vy: Math.sin(ang)*len };
+}
+
+/* ===== download imagem (PDF + overlay em HiDPI) ===== */
+$('#downloadImg').onclick = async ()=>{
+  const W = overlay.width, H = overlay.height;
+  if (!W || !H){ log('Nada para exportar.'); return; }
+  const dpr = window.devicePixelRatio || 1;
+  const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
+  const c = canvas.getContext('2d');
+  let rendered = false;
+  if (pdfPage){
+    try{
+      const viewport = pdfPage.getViewport({scale: scale * dpr});
+      const tmp = document.createElement('canvas'); tmp.width=viewport.width; tmp.height=viewport.height;
+      await pdfPage.render({canvasContext: tmp.getContext('2d'), viewport}).promise;
+      c.drawImage(tmp,0,0);
+      rendered = true;
+    }catch(err){ log('Falha ao renderizar PDF para exportar (exportando apenas desenhos).'); }
+  }else{
+    c.fillStyle='#ffffff'; c.fillRect(0,0,W,H);
+  }
+  c.drawImage(overlay,0,0);
+  const url = canvas.toDataURL('image/png');
+  const a=document.createElement('a'); a.href=url; a.download='Setor225.png'; a.click();
+  log(rendered ? 'Imagem exportada (PDF + desenhos, HiDPI).' : 'Imagem exportada (apenas desenhos, HiDPI).');
+};
+
+/* ===== desenho principal ===== */
+function redrawAll(){
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  tempPtsBase.forEach(([bx,by])=>{ const p=baseToDisp({x:bx,y:by}); drawMark(p.x,p.y); });
+
+  // círculo de referência (se definido)
+  if (showCircle && anchorBase && metersPerBasePx){
+    const rpx = radiusPxDisp();
+    const a = baseToDisp(anchorBase);
+    drawCircleAt(a.x, a.y, rpx, CIRCLE_COLOR);
+  }
+
+  // desenhar todos os setores (todos com centro no anchorBase)
+  if (metersPerBasePx && anchorBase && sectors225.length){
+    const rpx = radiusPxDisp();
+    const a = baseToDisp(anchorBase);
+    const GREEN_ALPHA = GREEN_ALPHA_FIXED;
+
+    sectors225.forEach(item=>{
+      const bis = item.bisAz;               // bissetriz do 90°
+      const bounds = [
+        normAz(bis - 45),
+        normAz(bis - 22.5),
+        normAz(bis),
+        normAz(bis + 22.5),
+        normAz(bis + 45)
+      ];
+
+      // 4 fatias verdes entre os 5 limites
+      for (let i=0;i<bounds.length-1;i++){
+        drawWedgeAt(a.x, a.y, rpx, bounds[i], bounds[i+1], 'verde', GREEN_ALPHA);
+      }
+
+      // linhas vermelhas e rótulos pretos
+      for (let i=0;i<bounds.length;i++){
+        drawRadialLine(a.x, a.y, rpx, bounds[i], 'rgba(255,0,0,0.95)', 2.2);
+        drawAzLabelAt(a.x, a.y, bounds[i], rpx + 12, '#000000'); // preto
+      }
+    });
+  }
+}
+
+/* ===== primitivos ===== */
+function drawCircleAt(cx, cy, r, color){
+  ctx.save();
+  ctx.strokeStyle = color || 'rgb(0,1,255)';
+  ctx.lineWidth = 2.6;
+  ctx.setLineDash([8,6]);
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
+}
+function drawWedgeAt(cx, cy, r, startDeg, endDeg, colorName, alpha){
+  // Azimute 0° = Norte (para cima), cresce no sentido horário.
+  const start = (-Math.PI/2) + toRad(startDeg);
+  let end = (-Math.PI/2) + toRad(endDeg);
+  let delta = end - start; if (delta <= 0) delta += Math.PI*2;
+  const segs = Math.max(12, Math.floor(delta/(Math.PI/72)));
+  const fillCol = (colorName==='verde') ? `rgba(0,255,0,${alpha})` : `rgba(255,0,0,${alpha})`;
+  ctx.save();
+  ctx.fillStyle = fillCol;
+  ctx.beginPath(); ctx.moveTo(cx, cy);
+  for (let i=0;i<=segs;i++){
+    const t = i/segs; const ang = start + t*delta;
+    ctx.lineTo(cx + Math.cos(ang)*r, cy + Math.sin(ang)*r);
+  }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function drawRadialLine(cx, cy, r, deg, stroke='rgba(255,0,0,0.95)', lw=2){
+  const v = bearingToCanvasVec(deg, r);
+  ctx.save();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lw;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + v.vx, cy + v.vy);
+  ctx.stroke();
+  ctx.restore();
+}
+function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){ // padrão: preto
+  const ang = (-Math.PI/2) + toRad(deg);
+  const x = cx + Math.cos(ang)*rOut;
+  const y = cy + Math.sin(ang)*rOut;
+  const m = 6; const dx = Math.cos(ang)*m, dy = Math.sin(ang)*m;
+  ctx.save();
+  ctx.font='bold 18px Arial, Helvetica, sans-serif';
+  ctx.textAlign   = (Math.cos(ang) >= 0) ? 'left'  : 'right';
+  ctx.textBaseline= (Math.sin(ang) >= 0) ? 'top'   : 'bottom';
+  ctx.fillStyle = fillColor;
+  const txt = (Math.round(deg*10)/10).toString();
+  ctx.fillText(`${txt}°`, x+dx, y+dy);
+  ctx.restore();
+}
+
+/* inicializa ajuste do Log + lista */
+adjustLogScroll();
+renderSectorList();
+</script>
+</body>
+</html>
