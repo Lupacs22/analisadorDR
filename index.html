@@ -52,7 +52,7 @@
   #stage{position:relative;background:#0a0d14;height:100%;overflow:auto}
   #content{position:relative}
   #layer-pdf,#layer-overlay{position:absolute;left:0;top:0;width:100%;height:100%}
-  #pdfCanvas{display:block;width:100%;height:100%;background:#11151f}
+  #pdfCanvas{display:block;width:100%;height:100%;background:#11151f; image-rendering: crisp-edges; image-rendering: pixelated;}
   #overlay{display:block;width:100%;height:100%;cursor:grab}
   #overlay.grabbing{cursor:grabbing}
   #overlay.cursor-xhair{cursor:crosshair !important}
@@ -172,6 +172,11 @@ const overlay = $('#overlay'); const ctx = overlay.getContext('2d');
 /* ================= base + zoom (HiDPI) ================= */
 let baseW=1200, baseH=800, scale=1;
 let renderTimer = null;
+
+/* duplo buffer para o PDF */
+const backCanvas = document.createElement('canvas');
+const backCtx = backCanvas.getContext('2d');
+
 function setBaseSize(w,h){ baseW=Math.max(1,Math.floor(w)); baseH=Math.max(1,Math.floor(h)); applyScale(true); }
 function applyScale(resetScroll=false){
   const dpr = window.devicePixelRatio || 1;
@@ -179,21 +184,22 @@ function applyScale(resetScroll=false){
   content.style.width = Wcss+'px';
   content.style.height = Hcss+'px';
 
+  /* overlay acompanha o CSS imediatamente (para não travar interação) */
   overlay.width   = Math.round(Wcss*dpr);
   overlay.height  = Math.round(Hcss*dpr);
-  pdfCanvas.width = Math.round(Wcss*dpr);
-  pdfCanvas.height= Math.round(Hcss*dpr);
+
+  /* NÃO redimensiona pdfCanvas aqui — mantém a imagem antiga até a nova ficar pronta */
+  // pdfCanvas.width/height serão atualizados após o render terminar
 
   // Overlay
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,overlay.width,overlay.height);
   ctx.setTransform(dpr,0,0,dpr,0,0);
 
-  // PDF com debounce (evita flicker/fundo grafite)
-  if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
-  renderTimer = setTimeout(()=>{ renderPdfAtScale(scale, dpr); }, 120);
+  // PDF com debounce + buffer (evita flicker/fundo escuro)
+  scheduleBufferedRender(scale, dpr);
 
-  // Desenhos
+  // Desenhos do overlay
   redrawAll();
 
   if (resetScroll){ stage.scrollLeft=0; stage.scrollTop=0; }
@@ -280,33 +286,59 @@ async function loadPdfFromArrayBuffer(buf){
   pdfPage = await pdfDoc.getPage(1);
   const viewportBase = pdfPage.getViewport({scale:1});
   setBaseSize(viewportBase.width, viewportBase.height);
-  await renderPdfAtScale(scale, window.devicePixelRatio||1);
+  await renderBufferedPdf(scale, window.devicePixelRatio||1); // primeira renderização já bufferizada
   log('PDF carregado e renderizado.');
 }
 
-async function renderPdfAtScale(s=1, dpr=1){
-  const c = pdfCtx;
+/* render agendado com debounce */
+function scheduleBufferedRender(s, dpr){
+  if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+  renderTimer = setTimeout(()=>{ renderBufferedPdf(s, dpr); }, 100);
+}
+
+/* render principal com duplo buffer */
+async function renderBufferedPdf(s=1, dpr=1){
+  if (!pdfPage) return;
+
+  /* cancela render anterior se houver */
   if (renderTask && typeof renderTask.cancel === 'function') {
     try { renderTask.cancel(); } catch(e) {}
     renderTask = null;
   }
-  // limpar com fundo opaco para evitar escurecimento
-  c.save();
-  c.setTransform(1,0,0,1,0,0);
-  c.globalAlpha = 1;
-  c.globalCompositeOperation = 'source-over';
-  c.fillStyle = '#11151f';
-  c.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
-  c.restore();
 
-  if (!pdfPage) return;
-
+  // prepara back buffer no tamanho alvo do viewport
   const viewport = pdfPage.getViewport({scale: s * dpr});
-  try {
-    renderTask = pdfPage.render({canvasContext: c, viewport});
+  backCanvas.width = viewport.width;
+  backCanvas.height = viewport.height;
+
+  const bc = backCtx;
+  bc.save();
+  bc.setTransform(1,0,0,1,0,0);
+  bc.globalAlpha = 1;
+  bc.globalCompositeOperation = 'source-over';
+  bc.fillStyle = '#ffffff'; // fundo claro no buffer (evita “grafite”/transparência)
+  bc.fillRect(0,0,backCanvas.width,backCanvas.height);
+  bc.restore();
+
+  try{
+    renderTask = pdfPage.render({canvasContext: bc, viewport});
     await renderTask.promise;
-  } catch(e) { /* cancelado */ }
-  finally { renderTask = null; }
+  } catch(e) {
+    // render cancelado (provavelmente outro zoom); não troca o canvas visível
+    return;
+  } finally {
+    renderTask = null;
+  }
+
+  // SWAP: só agora redimensiona o canvas visível e copia o buffer
+  pdfCanvas.width = backCanvas.width;
+  pdfCanvas.height = backCanvas.height;
+  pdfCtx.setTransform(1,0,0,1,0,0);
+  pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);
+  pdfCtx.drawImage(backCanvas, 0, 0);
+
+  // re-desenha overlay por cima (mantém tudo sincronizado)
+  redrawAll();
 }
 
 /* ================= arquivo ================= */
@@ -334,8 +366,9 @@ function hardReset(){
   content.style.width = baseW+'px'; content.style.height = baseH+'px';
   stage.scrollLeft=0; stage.scrollTop=0;
 
+  // mantém última imagem? vamos limpar visível com fundo claro
   pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
-  pdfCtx.setTransform(1,0,0,1,0,0); pdfCtx.fillStyle='#11151f'; pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
+  pdfCtx.setTransform(1,0,0,1,0,0); pdfCtx.fillStyle='#ffffff'; pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
 
   overlay.width = Math.round(baseW*dpr); overlay.height = Math.round(baseH*dpr);
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -569,6 +602,7 @@ $('#downloadImg').onclick = async ()=>{
   let rendered = false;
   if (pdfPage){
     try{
+      // render buffer no tamanho atual para exportar com qualidade
       const viewport = pdfPage.getViewport({scale: scale * dpr});
       const tmp = document.createElement('canvas'); tmp.width=viewport.width; tmp.height=viewport.height;
       await pdfPage.render({canvasContext: tmp.getContext('2d'), viewport}).promise;
