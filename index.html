@@ -358,8 +358,12 @@ function hardReset(){
   content.style.width = baseW+'px'; content.style.height = baseH+'px';
   stage.scrollLeft=0; stage.scrollTop=0;
 
-  pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
-  pdfCtx.setTransform(1,0,0,1,0,0); pdfCtx.fillStyle='#ffffff'; pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
+ pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
+ pdfCtx.setTransform(1,0,0,1,0,0);
+ pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);           // limpa o conteúdo
+ pdfCtx.fillStyle = '#11151f';                                      // mesma cor do CSS (fundo do app)
+ pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
+
 
   overlay.width = Math.round(baseW*dpr); overlay.height = Math.round(baseH*dpr);
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -809,3 +813,4 @@ renderMeasureList();
 </script>
 </body>
 </html>
+
