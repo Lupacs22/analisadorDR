@@ -184,19 +184,16 @@ function applyScale(resetScroll=false){
   content.style.width = Wcss+'px';
   content.style.height = Hcss+'px';
 
-  /* overlay acompanha o CSS imediatamente (para não travar interação) */
+  /* overlay acompanha o CSS imediatamente */
   overlay.width   = Math.round(Wcss*dpr);
   overlay.height  = Math.round(Hcss*dpr);
-
-  /* NÃO redimensiona pdfCanvas aqui — mantém a imagem antiga até a nova ficar pronta */
-  // pdfCanvas.width/height serão atualizados após o render terminar
 
   // Overlay
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,overlay.width,overlay.height);
   ctx.setTransform(dpr,0,0,dpr,0,0);
 
-  // PDF com debounce + buffer (evita flicker/fundo escuro)
+  // PDF com debounce + buffer
   scheduleBufferedRender(scale, dpr);
 
   // Desenhos do overlay
@@ -262,6 +259,10 @@ overlay.addEventListener('mousedown', (e)=>{
 const FIXED_RADIUS_KM = 4;
 const CIRCLE_COLOR = 'rgb(0,1,255)';
 const GREEN_ALPHA_FIXED = 0.2; // opacidade fixa 0,2
+/* NOVO: cores da régua */
+const MEASURE_COLOR      = 'rgba(0, 70, 160, 0.95)'; // azul mais escuro
+const MEASURE_PREVIEW    = 'rgba(0, 70, 160, 0.55)'; // preview semitransparente
+
 let mode=null; // 'calibDist' | 'anchor' | 'insert225' | 'measure'
 let tempPtsBase=[]; let metersPerBasePx=null;
 let anchorBase=null; let showCircle=false;
@@ -286,7 +287,7 @@ async function loadPdfFromArrayBuffer(buf){
   pdfPage = await pdfDoc.getPage(1);
   const viewportBase = pdfPage.getViewport({scale:1});
   setBaseSize(viewportBase.width, viewportBase.height);
-  await renderBufferedPdf(scale, window.devicePixelRatio||1); // primeira renderização já bufferizada
+  await renderBufferedPdf(scale, window.devicePixelRatio||1);
   log('PDF carregado e renderizado.');
 }
 
@@ -299,14 +300,11 @@ function scheduleBufferedRender(s, dpr){
 /* render principal com duplo buffer */
 async function renderBufferedPdf(s=1, dpr=1){
   if (!pdfPage) return;
-
-  /* cancela render anterior se houver */
   if (renderTask && typeof renderTask.cancel === 'function') {
     try { renderTask.cancel(); } catch(e) {}
     renderTask = null;
   }
 
-  // prepara back buffer no tamanho alvo do viewport
   const viewport = pdfPage.getViewport({scale: s * dpr});
   backCanvas.width = viewport.width;
   backCanvas.height = viewport.height;
@@ -316,28 +314,22 @@ async function renderBufferedPdf(s=1, dpr=1){
   bc.setTransform(1,0,0,1,0,0);
   bc.globalAlpha = 1;
   bc.globalCompositeOperation = 'source-over';
-  bc.fillStyle = '#ffffff'; // fundo claro no buffer (evita “grafite”/transparência)
+  bc.fillStyle = '#ffffff';
   bc.fillRect(0,0,backCanvas.width,backCanvas.height);
   bc.restore();
 
   try{
     renderTask = pdfPage.render({canvasContext: bc, viewport});
     await renderTask.promise;
-  } catch(e) {
-    // render cancelado (provavelmente outro zoom); não troca o canvas visível
-    return;
-  } finally {
-    renderTask = null;
-  }
+  } catch(e) { return; }
+  finally { renderTask = null; }
 
-  // SWAP: só agora redimensiona o canvas visível e copia o buffer
   pdfCanvas.width = backCanvas.width;
   pdfCanvas.height = backCanvas.height;
   pdfCtx.setTransform(1,0,0,1,0,0);
   pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);
   pdfCtx.drawImage(backCanvas, 0, 0);
 
-  // re-desenha overlay por cima (mantém tudo sincronizado)
   redrawAll();
 }
 
@@ -366,7 +358,6 @@ function hardReset(){
   content.style.width = baseW+'px'; content.style.height = baseH+'px';
   stage.scrollLeft=0; stage.scrollTop=0;
 
-  // mantém última imagem? vamos limpar visível com fundo claro
   pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
   pdfCtx.setTransform(1,0,0,1,0,0); pdfCtx.fillStyle='#ffffff'; pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
 
@@ -602,7 +593,6 @@ $('#downloadImg').onclick = async ()=>{
   let rendered = false;
   if (pdfPage){
     try{
-      // render buffer no tamanho atual para exportar com qualidade
       const viewport = pdfPage.getViewport({scale: scale * dpr});
       const tmp = document.createElement('canvas'); tmp.width=viewport.width; tmp.height=viewport.height;
       await pdfPage.render({canvasContext: tmp.getContext('2d'), viewport}).promise;
@@ -720,25 +710,27 @@ function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){
   ctx.restore();
 }
 
-/* === primitivos da régua === */
+/* === primitivos da régua (atualizados: azul escuro + setas) === */
 function drawMeasureSegment(aBase, bBase, preview=false){
   const a = baseToDisp(aBase), b = baseToDisp(bBase);
   const km = lengthKm(aBase, bBase);
   const mid = { x:(a.x+b.x)/2, y:(a.y+b.y)/2 };
 
+  const stroke = preview ? MEASURE_PREVIEW : MEASURE_COLOR;
+
   ctx.save();
   ctx.lineWidth = 2.4;
-  ctx.strokeStyle = preview ? 'rgba(0,229,255,0.5)' : 'rgba(0,229,255,0.95)';
+  ctx.strokeStyle = stroke;
   if (preview) ctx.setLineDash([6,6]);
 
-  // linha
+  // linha principal
   ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
-
-  // marcadores nas pontas
   ctx.setLineDash([]);
-  ctx.fillStyle = ctx.strokeStyle;
-  ctx.beginPath(); ctx.arc(a.x,a.y,4,0,Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(b.x,b.y,4,0,Math.PI*2); ctx.fill();
+
+  // setas nas pontas (triângulos preenchidos)
+  const ang = Math.atan2(b.y - a.y, b.x - a.x);
+  drawArrowHead(b.x, b.y, ang, 12, stroke);         // ponta B no sentido da linha
+  drawArrowHead(a.x, a.y, ang + Math.PI, 12, stroke); // ponta A no sentido oposto
 
   // rótulo (caixa clara + texto preto)
   const label = formatDist(km);
@@ -766,6 +758,30 @@ function drawMeasureSegment(aBase, bBase, preview=false){
 
   ctx.restore();
 }
+
+/* seta triangular preenchida apontando para "angle" */
+function drawArrowHead(x, y, angle, size, fill){
+  const w = size * 0.65;                 // largura da base
+  const bx = x - Math.cos(angle) * size; // ponto base (centro)
+  const by = y - Math.sin(angle) * size;
+  const px = Math.cos(angle + Math.PI/2) * (w/2);
+  const py = Math.sin(angle + Math.PI/2) * (w/2);
+
+  const p1 = {x, y};                     // ponta
+  const p2 = {x: bx + px, y: by + py};   // base esquerda
+  const p3 = {x: bx - px, y: by - py};   // base direita
+
+  ctx.save();
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(p2.x, p2.y);
+  ctx.lineTo(p3.x, p3.y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 function roundRect(ctx, x, y, w, h, r){
   ctx.beginPath();
   ctx.moveTo(x+r, y);
