@@ -42,7 +42,7 @@
   #stage{position:relative;background:#0a0d14;height:100%;overflow:auto}
   #content{position:relative}
   #layer-pdf,#layer-overlay{position:absolute;left:0;top:0;width:100%;height:100%}
-  #pdfCanvas{display:block;width:100%;height:100%;background:#11151f; image-rendering: crisp-edges; image-rendering: pixelated;}
+  #pdfCanvas{display:block;width:100%;height:100%;background:#11151f}
   #overlay{display:block;width:100%;height:100%;cursor:grab}
   #overlay.grabbing{cursor:grabbing}
   #overlay.cursor-xhair{cursor:crosshair !important}
@@ -147,52 +147,31 @@ function formatAzLabel(deg){ let n = Math.round(normAz(deg)); if (n===0) n=360; 
 const stage = $('#stage');
 const content = $('#content');
 const pdfCanvas = $('#pdfCanvas');
-const pdfCtx = pdfCanvas.getContext('2d', { alpha:false, willReadFrequently:true }); // evita escurecer
+const pdfCtx = pdfCanvas.getContext('2d'); // render direto, como no exemplo
 const overlay = $('#overlay'); const ctx = overlay.getContext('2d');
 
 /* ===== base + zoom (HiDPI) ===== */
 let baseW=1200, baseH=800, scale=1;
-let renderTimer = null;
-
-/* buffer PDF */
-const backCanvas = document.createElement('canvas');
-const backCtx = backCanvas.getContext('2d', { alpha:false });
-
-/* freeze-frame */
-let lastFrameBitmap = null;
-
 function setBaseSize(w,h){ baseW=Math.max(1,Math.floor(w)); baseH=Math.max(1,Math.floor(h)); applyScale(true); }
 function applyScale(resetScroll=false){
   const dpr = window.devicePixelRatio || 1;
   const Wcss = Math.round(baseW*scale), Hcss = Math.round(baseH*scale);
-  const Wpx  = Math.round(Wcss*dpr),   Hpx  = Math.round(Hcss*dpr);
 
-  // snapshot para freeze
-  if (pdfCanvas.width && pdfCanvas.height){
-    try { lastFrameBitmap = null; createImageBitmap(pdfCanvas).then(b=>{ lastFrameBitmap=b; }); } catch(e){}
-  }
+  // dimensiona área visível
+  content.style.width = Wcss+'px'; content.style.height = Hcss+'px';
 
-  content.style.width = Wcss+'px';
-  content.style.height = Hcss+'px';
+  // ajusta buffers HiDPI
+  overlay.width = Math.round(Wcss*dpr); overlay.height = Math.round(Hcss*dpr);
+  pdfCanvas.width = Math.round(Wcss*dpr); pdfCanvas.height = Math.round(Hcss*dpr);
 
-  overlay.width = Wpx; overlay.height = Hpx;
-  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height);
+  // limpa overlay e re-renderiza PDF na escala atual (SEM escurecer)
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,overlay.width,overlay.height);
   ctx.setTransform(dpr,0,0,dpr,0,0);
 
-  // redimensiona PDF canvas e aplica frame congelado usando 'copy'
-  pdfCanvas.width = Wpx; pdfCanvas.height = Hpx;
-  pdfCtx.imageSmoothingEnabled = true;
-  if (lastFrameBitmap){
-    try{
-      pdfCtx.setTransform(1,0,0,1,0,0);
-      pdfCtx.globalCompositeOperation = 'copy';
-      pdfCtx.drawImage(lastFrameBitmap, 0,0, pdfCanvas.width, pdfCanvas.height);
-      pdfCtx.globalCompositeOperation = 'source-over';
-    }catch(e){}
-  }
-
-  scheduleBufferedRender(scale, dpr);
+  renderPdfAtScale(scale, dpr); // <<< igual ao recurso do seu outro projeto
   redrawAll();
+
   if (resetScroll){ stage.scrollLeft=0; stage.scrollTop=0; }
 }
 $('#zoomIn').onclick  = ()=> zoomAtCenter(1.2);
@@ -283,47 +262,19 @@ async function loadPdfFromArrayBuffer(buf){
   pdfPage = await pdfDoc.getPage(1);
   const viewportBase = pdfPage.getViewport({scale:1});
   setBaseSize(viewportBase.width, viewportBase.height);
-  await renderBufferedPdf(scale, window.devicePixelRatio||1);
+  await renderPdfAtScale(scale, window.devicePixelRatio||1);
   log('PDF carregado e renderizado.');
 }
 
-function scheduleBufferedRender(s, dpr){
-  if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
-  renderTimer = setTimeout(()=>{ renderBufferedPdf(s, dpr); }, 80);
-}
-
-async function renderBufferedPdf(s=1, dpr=1){
+async function renderPdfAtScale(s=1, dpr=1){
+  const ctx2d = pdfCtx;
+  ctx2d.setTransform(1,0,0,1,0,0);
+  ctx2d.fillStyle='#11151f'; ctx2d.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
   if (!pdfPage) return;
-  if (renderTask && typeof renderTask.cancel === 'function') {
-    try { renderTask.cancel(); } catch(e) {}
-    renderTask = null;
-  }
-
+  if (renderTask && renderTask.cancel) { try{ renderTask.cancel(); }catch{} }
   const viewport = pdfPage.getViewport({scale: s * dpr});
-  backCanvas.width = viewport.width; backCanvas.height = viewport.height;
-
-  const bc = backCtx;
-  bc.save();
-  bc.setTransform(1,0,0,1,0,0);
-  bc.globalAlpha = 1;
-  bc.globalCompositeOperation = 'source-over';
-  bc.fillStyle = '#ffffff';
-  bc.fillRect(0,0,backCanvas.width,backCanvas.height);
-  bc.restore();
-
-  try{
-    renderTask = pdfPage.render({canvasContext: bc, viewport});
-    await renderTask.promise;
-  } catch(e) { return; }
-  finally { renderTask = null; }
-
-  // copia para o canvas visível SEM escurecer
-  pdfCtx.setTransform(1,0,0,1,0,0);
-  pdfCtx.globalCompositeOperation = 'copy';
-  pdfCtx.drawImage(backCanvas, 0, 0, pdfCanvas.width, pdfCanvas.height);
-  pdfCtx.globalCompositeOperation = 'source-over';
-
-  redrawAll();
+  renderTask = pdfPage.render({canvasContext: ctx2d, viewport});
+  try{ await renderTask.promise; }catch(e){ /* cancelado */ }
 }
 
 /* ===== arquivo ===== */
@@ -338,8 +289,6 @@ function hardReset(){
   overlay.classList.remove('cursor-xhair','grabbing');
 
   if (renderTask && typeof renderTask.cancel === 'function') { try { renderTask.cancel(); } catch(e) {} renderTask=null; }
-  if (renderTimer){ clearTimeout(renderTimer); renderTimer=null; }
-
   currentPdfBuffer=null; pdfDoc=null; pdfPage=null;
 
   logEl.textContent = '- Página resetada.'; adjustLogScroll();
@@ -353,9 +302,7 @@ function hardReset(){
 
   pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
   pdfCtx.setTransform(1,0,0,1,0,0);
-  pdfCtx.globalCompositeOperation='copy';
-  pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);
-  pdfCtx.globalCompositeOperation='source-over';
+  pdfCtx.fillStyle='#11151f'; pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
 
   overlay.width = Math.round(baseW*dpr); overlay.height = Math.round(baseH*dpr);
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -391,7 +338,7 @@ $('#clearCircle').onclick = ()=>{ anchorBase=null; showCircle=false; redrawAll()
 overlay.addEventListener('mousemove', (e)=>{
   lastMouseDisp = pointerDisplay(e);
 
-  // passeio 22,5° (labels só nas bordas, sem HUD da bissetriz)
+  // passeio 22,5° com rótulos só nas bordas
   if (mode==='probeMove' && activeProbeIndex>=0 && sectors225[activeProbeIndex] && anchorBase){
     const pBase = dispToBase(lastMouseDisp);
     const dx = pBase.x - anchorBase.x;
@@ -402,7 +349,7 @@ overlay.addEventListener('mousemove', (e)=>{
     let delta = shortAngleDiff(rawAz, s.bisAz);
     delta = clamp(delta, -maxOffset, maxOffset);
     s.probeAz = normAz(s.bisAz + delta);
-    redrawAll(); // atualiza apenas labels das bordas
+    redrawAll(); // atualiza labels
   }
 
   if (mode==='measure' && measureTemp){ redrawAll(); }
@@ -444,7 +391,7 @@ overlay.addEventListener('click', (e)=>{
     const dx = pBase.x - anchorBase.x;
     const dy = pBase.y - anchorBase.y;
     const bisAzFloat = normAz(toDeg(Math.atan2(dy, dx) + Math.PI/2));
-    const bisAz = Math.round(bisAzFloat); // <<< inteiro
+    const bisAz = Math.round(bisAzFloat); // inteiro
 
     sectors225.push({bisAz, probeAz: bisAz});
     log(`Setor 90° inserido (bissetriz ${bisAz}).`);
@@ -490,18 +437,18 @@ function renderSectorList(){
 
     const label = document.createElement('div'); label.className = 'label'; label.textContent = 'Bissetriz (°):';
 
-    // <<< edição somente em INTEIROS
+    // edição apenas inteiro
     const inp = document.createElement('input'); 
     inp.type='number'; 
     inp.step='1'; 
-    inp.value = String(Math.round(s.bisAz)); // mostra inteiro
+    inp.value = String(Math.round(s.bisAz));
     inp.addEventListener('change', ()=>{
       let v = parseInt(inp.value, 10);
       if (Number.isNaN(v)) v = 0;
-      v = ((v%360)+360)%360;       // normaliza 0..359
+      v = ((v%360)+360)%360;
       s.bisAz = v;
-      s.probeAz = v;               // recentra probe
-      inp.value = String(v);       // mantém inteiro
+      s.probeAz = v;
+      inp.value = String(v);
       redrawAll();
       log(`Setor ${i+1} atualizado para bissetriz ${v}.`);
     });
@@ -567,7 +514,7 @@ $('#downloadImg').onclick = async ()=>{
   if (!W || !H){ log('Nada para exportar.'); return; }
   const dpr = window.devicePixelRatio || 1;
   const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
-  const c = canvas.getContext('2d', { alpha:false });
+  const c = canvas.getContext('2d');
   let rendered = false;
   if (pdfPage){
     try{
@@ -630,12 +577,13 @@ function redrawAll(){
       const probeEnd   = normAz(probe + 11.25);
       drawWedgeCustom(a.x, a.y, rpx, probeStart, probeEnd, PROBE_FILL, PROBE_EDGE, 2.2);
 
-      // >>> Somente rótulos nas BORDAS do setor de passeio (sem HUD da bissetriz)
-      if (mode==='probeMove' && activeProbeIndex>=0 && sectors225[activeProbeIndex]===item){
-        const lblR = rpx + 12;
-        drawAzLabelAt(a.x, a.y, probeStart, lblR, '#000000');
-        drawAzLabelAt(a.x, a.y, probeEnd,   lblR, '#000000');
-      }
+      // >>> Rótulos SEMPRE nas BORDAS do setor de passeio (sem HUD da bissetriz)
+	{
+ 	 const lblR = rpx + 12;
+  	drawAzLabelAt(a.x, a.y, probeStart, lblR, '#000000');
+  	drawAzLabelAt(a.x, a.y, probeEnd,   lblR, '#000000');
+	}
+
     });
   }
 
