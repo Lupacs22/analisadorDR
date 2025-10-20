@@ -28,27 +28,17 @@
   .small{font-size:12px;color:var(--muted)}
   .sep{height:1px;background:#1b2230;margin:8px 0}
 
-  /* Lista de setores */
-  #sectorList .item{
-    display:flex; align-items:center; gap:8px;
-    padding:6px; border:1px solid #2a3954; border-radius:10px; margin-bottom:8px;
-    background:#0b0f16;
-  }
+  #sectorList .item{display:flex; align-items:center; gap:8px;padding:6px; border:1px solid #2a3954; border-radius:10px; margin-bottom:8px;background:#0b0f16;}
   #sectorList .idx{width:36px;text-align:center;color:#cfe1ff;font-weight:600}
   #sectorList .label{font-size:12px;color:#b9c3da}
   #sectorList .grow{flex:1 1 auto}
-  #sectorList .btn-del{white-space:nowrap}
+  #sectorList .controls{display:flex; gap:6px; flex-wrap:wrap}
 
-  /* Lista de medidas (régua) */
-  #measureList .item{
-    display:flex; align-items:center; gap:8px;
-    padding:6px; border:1px solid #2a3954; border-radius:10px; margin-bottom:8px; background:#0b0f16;
-  }
+  #measureList .item{display:flex; align-items:center; gap:8px;padding:6px; border:1px solid #2a3954; border-radius:10px; margin-bottom:8px; background:#0b0f16;}
   #measureList .idx{width:36px;text-align:center;color:#cfe1ff;font-weight:600}
   #measureList .val{font-size:12px;color:#b9c3da}
   #measureList .grow{flex:1 1 auto}
 
-  /* Área visual */
   #stage{position:relative;background:#0a0d14;height:100%;overflow:auto}
   #content{position:relative}
   #layer-pdf,#layer-overlay{position:absolute;left:0;top:0;width:100%;height:100%}
@@ -57,7 +47,6 @@
   #overlay.grabbing{cursor:grabbing}
   #overlay.cursor-xhair{cursor:crosshair !important}
 
-  /* Log – quebra de linha + rolagem quando passar de 10 linhas */
   #log{white-space:pre-wrap; overflow-wrap:anywhere}
 </style>
 </head>
@@ -100,6 +89,7 @@
       <h2>Setor de 22,5° e raio de 4 km</h2>
       <div class="row">
         <button id="btnInsert225">Inserir</button>
+        <button id="btnStopProbe">Parar passeio</button>
         <button id="btnClear225">Limpar setores</button>
       </div>
       <div class="sep"></div>
@@ -140,65 +130,69 @@
   </div>
 </div>
 
-<!-- PDF.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
-/* ================= util ================= */
+/* ===== util ===== */
 const $ = s => document.querySelector(s);
 const logEl = $('#log');
-function adjustLogScroll(){
-  const lines = logEl.textContent.split('\n').length;
-  if (lines > 10){
-    logEl.style.maxHeight = '220px';
-    logEl.style.overflowY = 'auto';
-  } else {
-    logEl.style.maxHeight = '';
-    logEl.style.overflowY = '';
-  }
-  logEl.scrollTop = logEl.scrollHeight;
-}
+function adjustLogScroll(){ const lines = logEl.textContent.split('\n').length; if (lines > 10){ logEl.style.maxHeight = '220px'; logEl.style.overflowY = 'auto'; } else { logEl.style.maxHeight=''; logEl.style.overflowY=''; } logEl.scrollTop = logEl.scrollHeight; }
 function log(m){ logEl.textContent += '\n- ' + m; adjustLogScroll(); }
-function toRad(d){return d*Math.PI/180}
-function toDeg(r){return r*180/Math.PI}
+function toRad(d){return d*Math.PI/180} function toDeg(r){return r*180/Math.PI}
 function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
-function normAz(d){ let x = ((d%360)+360)%360; return x; }
+function normAz(d){ return ((d%360)+360)%360; }
+function shortAngleDiff(a,b){ let d = (a-b+540)%360 - 180; return d; }
+function formatAzLabel(deg){ let n = Math.round(normAz(deg)); if (n===0) n=360; return String(n).padStart(3,'0'); }
 
-/* ================= camadas ================= */
+/* ===== camadas ===== */
 const stage = $('#stage');
 const content = $('#content');
-const pdfCanvas = $('#pdfCanvas'); const pdfCtx = pdfCanvas.getContext('2d');
+const pdfCanvas = $('#pdfCanvas');
+const pdfCtx = pdfCanvas.getContext('2d', { alpha:false, willReadFrequently:true }); // evita escurecer
 const overlay = $('#overlay'); const ctx = overlay.getContext('2d');
 
-/* ================= base + zoom (HiDPI) ================= */
+/* ===== base + zoom (HiDPI) ===== */
 let baseW=1200, baseH=800, scale=1;
 let renderTimer = null;
 
-/* duplo buffer para o PDF */
+/* buffer PDF */
 const backCanvas = document.createElement('canvas');
-const backCtx = backCanvas.getContext('2d');
+const backCtx = backCanvas.getContext('2d', { alpha:false });
+
+/* freeze-frame */
+let lastFrameBitmap = null;
 
 function setBaseSize(w,h){ baseW=Math.max(1,Math.floor(w)); baseH=Math.max(1,Math.floor(h)); applyScale(true); }
 function applyScale(resetScroll=false){
   const dpr = window.devicePixelRatio || 1;
   const Wcss = Math.round(baseW*scale), Hcss = Math.round(baseH*scale);
+  const Wpx  = Math.round(Wcss*dpr),   Hpx  = Math.round(Hcss*dpr);
+
+  // snapshot para freeze
+  if (pdfCanvas.width && pdfCanvas.height){
+    try { lastFrameBitmap = null; createImageBitmap(pdfCanvas).then(b=>{ lastFrameBitmap=b; }); } catch(e){}
+  }
+
   content.style.width = Wcss+'px';
   content.style.height = Hcss+'px';
 
-  /* overlay acompanha o CSS imediatamente */
-  overlay.width   = Math.round(Wcss*dpr);
-  overlay.height  = Math.round(Hcss*dpr);
-
-  // Overlay
-  ctx.setTransform(1,0,0,1,0,0);
-  ctx.clearRect(0,0,overlay.width,overlay.height);
+  overlay.width = Wpx; overlay.height = Hpx;
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height);
   ctx.setTransform(dpr,0,0,dpr,0,0);
 
-  // PDF com debounce + buffer
+  // redimensiona PDF canvas e aplica frame congelado usando 'copy'
+  pdfCanvas.width = Wpx; pdfCanvas.height = Hpx;
+  pdfCtx.imageSmoothingEnabled = true;
+  if (lastFrameBitmap){
+    try{
+      pdfCtx.setTransform(1,0,0,1,0,0);
+      pdfCtx.globalCompositeOperation = 'copy';
+      pdfCtx.drawImage(lastFrameBitmap, 0,0, pdfCanvas.width, pdfCanvas.height);
+      pdfCtx.globalCompositeOperation = 'source-over';
+    }catch(e){}
+  }
+
   scheduleBufferedRender(scale, dpr);
-
-  // Desenhos do overlay
   redrawAll();
-
   if (resetScroll){ stage.scrollLeft=0; stage.scrollTop=0; }
 }
 $('#zoomIn').onclick  = ()=> zoomAtCenter(1.2);
@@ -217,25 +211,24 @@ function zoomAtCenter(factor){
 }
 function zoomAtCursor(clientX, clientY, factor){
   const old = scale;
-  const ns = clamp(scale * factor, 0.1, 16);
+  const ns = clamp(scale * factor, 0.15, 16);
   if (ns === old) return;
   const sRect = stage.getBoundingClientRect();
   const pxDisp = stage.scrollLeft + (clientX - sRect.left);
   const pyDisp = stage.scrollTop  + (clientY - sRect.top);
   const baseX = pxDisp / old;
   const baseY = pyDisp / old;
-  scale = ns;
-  applyScale(false);
+  scale = ns; applyScale(false);
   const newPx = baseX * ns, newPy = baseY * ns;
   stage.scrollLeft = Math.max(0, newPx - (clientX - sRect.left));
   stage.scrollTop  = Math.max(0, newPy - (clientY - sRect.top));
 }
 
-/* ================= pan ================= */
+/* ===== pan ===== */
 let isPanning=false, panStart=null, scrollStart=null, suppressClick=false;
 overlay.addEventListener('mousedown', (e)=>{
   if (e.button!==0) return;
-  if (mode) return;
+  if (mode && mode!=='probeMove') return;
   isPanning=false;
   panStart = {x:e.clientX, y:e.clientY};
   scrollStart = {x:stage.scrollLeft, y:stage.scrollTop};
@@ -255,24 +248,27 @@ overlay.addEventListener('mousedown', (e)=>{
   document.addEventListener('mouseup', onUp);
 });
 
-/* ================= estados ================= */
+/* ===== estados ===== */
 const FIXED_RADIUS_KM = 4;
+const SECTOR90_ALPHA = 0.10;
+const PROBE_ALPHA    = 0.30;
 const CIRCLE_COLOR = 'rgb(0,1,255)';
-const GREEN_ALPHA_FIXED = 0.2; // opacidade fixa 0,2
-/* NOVO: cores da régua */
-const MEASURE_COLOR      = 'rgba(0, 70, 160, 0.95)'; // azul mais escuro
-const MEASURE_PREVIEW    = 'rgba(0, 70, 160, 0.55)'; // preview semitransparente
+const MEASURE_COLOR      = 'rgba(0, 70, 160, 0.95)';
+const MEASURE_PREVIEW    = 'rgba(0, 70, 160, 0.55)';
+const PROBE_FILL = `rgba(0, 255, 0, ${PROBE_ALPHA})`;
+const PROBE_EDGE = 'rgba(0,128,0,0.9)';
 
-let mode=null; // 'calibDist' | 'anchor' | 'insert225' | 'measure'
+let mode=null; // 'calibDist' | 'anchor' | 'insert225' | 'measure' | 'probeMove'
 let tempPtsBase=[]; let metersPerBasePx=null;
 let anchorBase=null; let showCircle=false;
 
-let sectors225 = []; // {bisAz}
-let measures = [];   // {a:{x,y}, b:{x,y}} em coords base
-let measureTemp = null; // primeiro ponto da régua (base)
-let lastMouseDisp = null; // para pré-visualização
+let sectors225 = []; // {bisAz, probeAz}
+let measures = [];   // {a:{x,y}, b:{x,y}}
+let measureTemp = null;
+let lastMouseDisp = null;
+let activeProbeIndex = -1;
 
-/* ================= PDF.js ================= */
+/* ===== PDF.js ===== */
 let currentPdfBuffer = null;
 let pdfDoc = null;
 let pdfPage = null;
@@ -291,13 +287,11 @@ async function loadPdfFromArrayBuffer(buf){
   log('PDF carregado e renderizado.');
 }
 
-/* render agendado com debounce */
 function scheduleBufferedRender(s, dpr){
   if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
-  renderTimer = setTimeout(()=>{ renderBufferedPdf(s, dpr); }, 100);
+  renderTimer = setTimeout(()=>{ renderBufferedPdf(s, dpr); }, 80);
 }
 
-/* render principal com duplo buffer */
 async function renderBufferedPdf(s=1, dpr=1){
   if (!pdfPage) return;
   if (renderTask && typeof renderTask.cancel === 'function') {
@@ -306,8 +300,7 @@ async function renderBufferedPdf(s=1, dpr=1){
   }
 
   const viewport = pdfPage.getViewport({scale: s * dpr});
-  backCanvas.width = viewport.width;
-  backCanvas.height = viewport.height;
+  backCanvas.width = viewport.width; backCanvas.height = viewport.height;
 
   const bc = backCtx;
   bc.save();
@@ -324,16 +317,16 @@ async function renderBufferedPdf(s=1, dpr=1){
   } catch(e) { return; }
   finally { renderTask = null; }
 
-  pdfCanvas.width = backCanvas.width;
-  pdfCanvas.height = backCanvas.height;
+  // copia para o canvas visível SEM escurecer
   pdfCtx.setTransform(1,0,0,1,0,0);
-  pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);
-  pdfCtx.drawImage(backCanvas, 0, 0);
+  pdfCtx.globalCompositeOperation = 'copy';
+  pdfCtx.drawImage(backCanvas, 0, 0, pdfCanvas.width, pdfCanvas.height);
+  pdfCtx.globalCompositeOperation = 'source-over';
 
   redrawAll();
 }
 
-/* ================= arquivo ================= */
+/* ===== arquivo ===== */
 $('#resetAll').onclick = ()=>{
   const ok = confirm('Deseja realmente resetar? Isso removerá o PDF e todos os desenhos.');
   if (!ok){ log('Reset cancelado.'); return; }
@@ -341,7 +334,7 @@ $('#resetAll').onclick = ()=>{
 };
 
 function hardReset(){
-  mode = null;
+  mode = null; activeProbeIndex = -1;
   overlay.classList.remove('cursor-xhair','grabbing');
 
   if (renderTask && typeof renderTask.cancel === 'function') { try { renderTask.cancel(); } catch(e) {} renderTask=null; }
@@ -358,12 +351,11 @@ function hardReset(){
   content.style.width = baseW+'px'; content.style.height = baseH+'px';
   stage.scrollLeft=0; stage.scrollTop=0;
 
- pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
- pdfCtx.setTransform(1,0,0,1,0,0);
- pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);           // limpa o conteúdo
- pdfCtx.fillStyle = '#11151f';                                      // mesma cor do CSS (fundo do app)
- pdfCtx.fillRect(0,0,pdfCanvas.width,pdfCanvas.height);
-
+  pdfCanvas.width = Math.round(baseW*dpr); pdfCanvas.height = Math.round(baseH*dpr);
+  pdfCtx.setTransform(1,0,0,1,0,0);
+  pdfCtx.globalCompositeOperation='copy';
+  pdfCtx.clearRect(0,0,pdfCanvas.width,pdfCanvas.height);
+  pdfCtx.globalCompositeOperation='source-over';
 
   overlay.width = Math.round(baseW*dpr); overlay.height = Math.round(baseH*dpr);
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -386,45 +378,41 @@ $('#file').addEventListener('change', async e=>{
   resetCalcs();
 });
 
-/* ================= helpers de escala/status ================= */
-function updateScaleStatus(){
-  $('#scaleStatus').textContent = metersPerBasePx ? 'definida' : 'não definida';
-}
-function requireScaleOrAlert(){
-  if (!metersPerBasePx){
-    alert('Defina a escala por distância primeiro.');
-    return false;
-  }
-  return true;
-}
+/* ===== helpers ===== */
+function updateScaleStatus(){ $('#scaleStatus').textContent = metersPerBasePx ? 'definida' : 'não definida'; }
+function requireScaleOrAlert(){ if (!metersPerBasePx){ alert('Defina a escala por distância primeiro.'); return false;} return true; }
 
-/* ================= calibração & círculo ================= */
-$('#btnCalibDist').onclick = ()=>{
-  mode='calibDist'; tempPtsBase=[];
-  overlay.classList.add('cursor-xhair');
-  log('Calibrar por distância: clique 2 pontos e informe a distância real (km).');
-};
-$('#btnAnchor').onclick = ()=>{
-  if (!requireScaleOrAlert()) return;
-  mode='anchor';
-  overlay.classList.add('cursor-xhair');
-  log('Clique para definir o centro do círculo (4 km).');
-};
-$('#clearCircle').onclick = ()=>{
-  anchorBase=null; showCircle=false;
-  redrawAll();
-  log('Círculo removido.');
-};
+/* ===== calibração & círculo ===== */
+$('#btnCalibDist').onclick = ()=>{ mode='calibDist'; tempPtsBase=[]; overlay.classList.add('cursor-xhair'); log('Calibrar por distância: clique 2 pontos e informe a distância real (km).'); };
+$('#btnAnchor').onclick = ()=>{ if (!requireScaleOrAlert()) return; mode='anchor'; overlay.classList.add('cursor-xhair'); log('Clique para definir o centro do círculo (4 km).'); };
+$('#clearCircle').onclick = ()=>{ anchorBase=null; showCircle=false; redrawAll(); log('Círculo removido.'); };
 
-/* ================= eventos do overlay ================= */
+/* ===== eventos overlay ===== */
 overlay.addEventListener('mousemove', (e)=>{
   lastMouseDisp = pointerDisplay(e);
-  if (mode==='measure' && measureTemp){ redrawAll(); } // pré-visualização
+
+  // passeio 22,5° (labels só nas bordas, sem HUD da bissetriz)
+  if (mode==='probeMove' && activeProbeIndex>=0 && sectors225[activeProbeIndex] && anchorBase){
+    const pBase = dispToBase(lastMouseDisp);
+    const dx = pBase.x - anchorBase.x;
+    const dy = pBase.y - anchorBase.y;
+    const rawAz = normAz(toDeg(Math.atan2(dy, dx) + Math.PI/2)); // 0=N
+    const s = sectors225[activeProbeIndex];
+    const maxOffset = 45 - 11.25; // 33.75
+    let delta = shortAngleDiff(rawAz, s.bisAz);
+    delta = clamp(delta, -maxOffset, maxOffset);
+    s.probeAz = normAz(s.bisAz + delta);
+    redrawAll(); // atualiza apenas labels das bordas
+  }
+
+  if (mode==='measure' && measureTemp){ redrawAll(); }
 });
 
 overlay.addEventListener('click', (e)=>{
   if (suppressClick) return;
   const pDisp = pointerDisplay(e); const pBase = dispToBase(pDisp);
+
+  if (mode==='probeMove'){ stopProbe(); log('Passeio 22,5° finalizado.'); return; }
 
   if (mode==='calibDist'){
     tempPtsBase.push([pBase.x,pBase.y]); drawMark(pDisp.x,pDisp.y);
@@ -453,14 +441,13 @@ overlay.addEventListener('click', (e)=>{
     if (!requireScaleOrAlert()) { mode=null; overlay.classList.remove('cursor-xhair'); return; }
     if (!anchorBase){ alert('Defina primeiro o centro do círculo.'); mode=null; overlay.classList.remove('cursor-xhair'); return; }
 
-    // Azimute da linha centro -> clique (0° = norte, sentido horário)
     const dx = pBase.x - anchorBase.x;
-    const dy = pBase.y - anchorBase.y; // y para baixo
-    const rad = Math.atan2(dy, dx) + Math.PI/2;
-    const bisAz = normAz(toDeg(rad));
+    const dy = pBase.y - anchorBase.y;
+    const bisAzFloat = normAz(toDeg(Math.atan2(dy, dx) + Math.PI/2));
+    const bisAz = Math.round(bisAzFloat); // <<< inteiro
 
-    sectors225.push({bisAz});
-    log(`Setor 90° (4 × 22,5°) inserido com bissetriz em ${bisAz.toFixed(1)}°.`);
+    sectors225.push({bisAz, probeAz: bisAz});
+    log(`Setor 90° inserido (bissetriz ${bisAz}).`);
     renderSectorList();
     mode=null; overlay.classList.remove('cursor-xhair');
     redrawAll();
@@ -485,20 +472,12 @@ overlay.addEventListener('click', (e)=>{
   }
 });
 
-/* ================= Setor 22,5° ================= */
-$('#btnInsert225').onclick = ()=>{
-  if (!requireScaleOrAlert()) return;
-  if (!anchorBase){ alert('Defina primeiro o centro do círculo.'); return; }
-  mode='insert225';
-  overlay.classList.add('cursor-xhair');
-  log('Clique no mapa para orientar a bissetriz do setor 90° (4 × 22,5°).');
-};
-$('#btnClear225').onclick = ()=>{
-  sectors225 = [];
-  renderSectorList();
-  redrawAll();
-  log('Todos os setores removidos.');
-};
+/* ===== Setor 22,5° ===== */
+$('#btnInsert225').onclick = ()=>{ if (!requireScaleOrAlert()) return; if (!anchorBase){ alert('Defina primeiro o centro do círculo.'); return; } mode='insert225'; overlay.classList.add('cursor-xhair'); log('Clique no mapa para orientar a bissetriz do setor 90°.'); };
+$('#btnClear225').onclick = ()=>{ sectors225 = []; activeProbeIndex=-1; renderSectorList(); redrawAll(); log('Todos os setores removidos.'); };
+$('#btnStopProbe').onclick = ()=>{ if (mode==='probeMove'){ stopProbe(); log('Passeio 22,5° interrompido.'); } };
+
+function stopProbe(){ mode = null; activeProbeIndex = -1; overlay.classList.remove('cursor-xhair'); }
 
 function renderSectorList(){
   const list = $('#sectorList');
@@ -511,96 +490,91 @@ function renderSectorList(){
 
     const label = document.createElement('div'); label.className = 'label'; label.textContent = 'Bissetriz (°):';
 
-    const inp = document.createElement('input'); inp.type='number'; inp.step='0.1'; inp.value=(Math.round(s.bisAz*10)/10);
+    // <<< edição somente em INTEIROS
+    const inp = document.createElement('input'); 
+    inp.type='number'; 
+    inp.step='1'; 
+    inp.value = String(Math.round(s.bisAz)); // mostra inteiro
     inp.addEventListener('change', ()=>{
-      s.bisAz = normAz(Number(inp.value)||0);
-      inp.value = (Math.round(s.bisAz*10)/10);
+      let v = parseInt(inp.value, 10);
+      if (Number.isNaN(v)) v = 0;
+      v = ((v%360)+360)%360;       // normaliza 0..359
+      s.bisAz = v;
+      s.probeAz = v;               // recentra probe
+      inp.value = String(v);       // mantém inteiro
       redrawAll();
-      log(`Setor ${i+1} atualizado para bissetriz ${s.bisAz.toFixed(1)}°.`);
+      log(`Setor ${i+1} atualizado para bissetriz ${v}.`);
     });
 
     const filler = document.createElement('div'); filler.className='grow';
 
-    const del = document.createElement('button'); del.className='btn-del'; del.textContent='Excluir';
-    del.addEventListener('click', ()=>{
-      const rem = sectors225.splice(i,1);
-      renderSectorList();
-      redrawAll();
-      if (rem.length) log(`Setor ${i+1} removido (bissetriz ${rem[0].bisAz.toFixed(1)}°).`);
+    const controls = document.createElement('div'); controls.className='controls';
+
+    const btnProbe = document.createElement('button'); btnProbe.textContent='Passear 22,5°';
+    btnProbe.addEventListener('click', ()=>{
+      if (!anchorBase){ alert('Defina o centro primeiro.'); return; }
+      activeProbeIndex = i;
+      mode='probeMove';
+      overlay.classList.add('cursor-xhair');
+      log(`Passeio 22,5° no setor ${i+1}: mova o mouse; clique ou "Parar passeio" para finalizar.`);
     });
 
-    item.append(idx, label, inp, filler, del);
+    const btnCenter = document.createElement('button'); btnCenter.textContent='Centralizar';
+    btnCenter.addEventListener('click', ()=>{
+      s.probeAz = s.bisAz; redrawAll();
+      log(`Setor ${i+1}: probe 22,5° centralizado na bissetriz.`);
+    });
+
+    const del = document.createElement('button'); del.textContent='Excluir';
+    del.addEventListener('click', ()=>{
+      const rem = sectors225.splice(i,1);
+      if (activeProbeIndex===i){ stopProbe(); }
+      renderSectorList(); redrawAll();
+      if (rem.length) log(`Setor ${i+1} removido.`);
+    });
+
+    controls.append(btnProbe, btnCenter, del);
+    item.append(idx, label, inp, filler, controls);
     list.appendChild(item);
   });
 }
 
-/* ================= Régua ================= */
-$('#btnMeasure').onclick = ()=>{
-  if (!requireScaleOrAlert()) return;
-  mode='measure';
-  measureTemp=null;
-  overlay.classList.add('cursor-xhair');
-  log('Régua: clique o primeiro ponto e depois o segundo.');
-};
-$('#btnClearMeasure').onclick = ()=>{
-  measures = [];
-  measureTemp=null;
-  renderMeasureList();
-  redrawAll();
-  log('Todas as medidas foram removidas.');
-};
+/* ===== Régua ===== */
+$('#btnMeasure').onclick = ()=>{ if (!requireScaleOrAlert()) return; mode='measure'; measureTemp=null; overlay.classList.add('cursor-xhair'); log('Régua: clique o primeiro ponto e depois o segundo.'); };
+$('#btnClearMeasure').onclick = ()=>{ measures = []; measureTemp=null; renderMeasureList(); redrawAll(); log('Todas as medidas foram removidas.'); };
 
 function renderMeasureList(){
-  const list = $('#measureList');
-  list.innerHTML = '';
+  const list = $('#measureList'); list.innerHTML = '';
   measures.forEach((m, i)=>{
     const km = lengthKm(m.a, m.b);
-    const item = document.createElement('div');
-    item.className = 'item';
-
+    const item = document.createElement('div'); item.className = 'item';
     const idx = document.createElement('div'); idx.className='idx'; idx.textContent = i+1;
     const val = document.createElement('div'); val.className='val'; val.textContent = formatDist(km);
-
     const filler = document.createElement('div'); filler.className='grow';
-
     const del = document.createElement('button'); del.textContent='Excluir';
-    del.addEventListener('click', ()=>{
-      measures.splice(i,1);
-      renderMeasureList();
-      redrawAll();
-      log(`Medida ${i+1} removida.`);
-    });
-
+    del.addEventListener('click', ()=>{ measures.splice(i,1); renderMeasureList(); redrawAll(); log(`Medida ${i+1} removida.`); });
     item.append(idx, val, filler, del);
     list.appendChild(item);
   });
 }
 
-function lengthKm(a, b){
-  if (!metersPerBasePx) return 0;
-  const dBase = Math.hypot(b.x - a.x, b.y - a.y);
-  const meters = dBase * metersPerBasePx;
-  return meters / 1000;
-}
-function formatDist(km){
-  if (km >= 1) return `${km.toFixed(2)} km`;
-  return `${Math.round(km*1000)} m`;
-}
+function lengthKm(a, b){ if (!metersPerBasePx) return 0; const dBase = Math.hypot(b.x - a.x, b.y - a.y); const meters = dBase * metersPerBasePx; return meters / 1000; }
+function formatDist(km){ if (km >= 1) return `${km.toFixed(2)} km`; return `${Math.round(km*1000)} m`; }
 
-/* ================= download imagem ================= */
+/* ===== download imagem ===== */
 $('#downloadImg').onclick = async ()=>{
   const W = overlay.width, H = overlay.height;
   if (!W || !H){ log('Nada para exportar.'); return; }
   const dpr = window.devicePixelRatio || 1;
   const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
-  const c = canvas.getContext('2d');
+  const c = canvas.getContext('2d', { alpha:false });
   let rendered = false;
   if (pdfPage){
     try{
       const viewport = pdfPage.getViewport({scale: scale * dpr});
       const tmp = document.createElement('canvas'); tmp.width=viewport.width; tmp.height=viewport.height;
       await pdfPage.render({canvasContext: tmp.getContext('2d'), viewport}).promise;
-      c.drawImage(tmp,0,0);
+      c.drawImage(tmp,0,0, W, H);
       rendered = true;
     }catch(err){ log('Falha ao renderizar PDF para exportar (exportando apenas desenhos).'); }
   }else{
@@ -612,7 +586,7 @@ $('#downloadImg').onclick = async ()=>{
   log(rendered ? 'Imagem exportada (PDF + desenhos, HiDPI).' : 'Imagem exportada (apenas desenhos, HiDPI).');
 };
 
-/* ================= desenho principal ================= */
+/* ===== desenho principal ===== */
 function redrawAll(){
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(1,0,0,1,0,0);
@@ -629,74 +603,82 @@ function redrawAll(){
     drawCircleAt(a.x, a.y, rpx, CIRCLE_COLOR);
   }
 
-  // setores 22,5° (4 fatias)
+  // setor 90° + probe 22,5°
   if (metersPerBasePx && anchorBase && sectors225.length){
     const rpx = radiusPxDisp();
     const a = baseToDisp(anchorBase);
-    const GREEN_ALPHA = GREEN_ALPHA_FIXED;
 
     sectors225.forEach(item=>{
       const bis = item.bisAz;
-      const bounds = [normAz(bis-45), normAz(bis-22.5), normAz(bis), normAz(bis+22.5), normAz(bis+45)];
-      for (let i=0;i<bounds.length-1;i++){
-        drawWedgeAt(a.x, a.y, rpx, bounds[i], bounds[i+1], 'verde', GREEN_ALPHA);
-      }
-      for (let i=0;i<bounds.length;i++){
-        drawRadialLine(a.x, a.y, rpx, bounds[i], 'rgba(255,0,0,0.95)', 2.2);
-        drawAzLabelAt(a.x, a.y, bounds[i], rpx + 12, '#000000'); // rótulo preto
+      const start90 = normAz(bis - 45);
+      const end90   = normAz(bis + 45);
+
+      // 90° verde 10%
+      drawWedgeCustom(a.x, a.y, rpx, start90, end90, `rgba(0,255,0,${SECTOR90_ALPHA})`, 'rgba(0,128,0,0.8)', 1.6);
+
+      // bordas do 90° (sem bissetriz)
+      const bounds = [start90, end90];
+      const labelOffset = rpx + 12;
+      bounds.forEach((d)=>{
+        drawRadialLine(a.x, a.y, rpx, d, 'rgba(255,0,0,0.95)', 2.2);
+        drawAzLabelAt(a.x, a.y, d, labelOffset, '#000000');
+      });
+
+      // PROBE 22,5° (verde 30%)
+      const probe = (typeof item.probeAz==='number') ? item.probeAz : bis;
+      const probeStart = normAz(probe - 11.25);
+      const probeEnd   = normAz(probe + 11.25);
+      drawWedgeCustom(a.x, a.y, rpx, probeStart, probeEnd, PROBE_FILL, PROBE_EDGE, 2.2);
+
+      // >>> Somente rótulos nas BORDAS do setor de passeio (sem HUD da bissetriz)
+      if (mode==='probeMove' && activeProbeIndex>=0 && sectors225[activeProbeIndex]===item){
+        const lblR = rpx + 12;
+        drawAzLabelAt(a.x, a.y, probeStart, lblR, '#000000');
+        drawAzLabelAt(a.x, a.y, probeEnd,   lblR, '#000000');
       }
     });
   }
 
-  // medidas fixas
+  // medidas
   if (metersPerBasePx && measures.length){
-    measures.forEach(m=>{
-      drawMeasureSegment(m.a, m.b);
-    });
+    measures.forEach(m=>{ drawMeasureSegment(m.a, m.b); });
   }
 
-  // pré-visualização da régua
+  // prévia régua
   if (mode==='measure' && measureTemp && lastMouseDisp){
     const p2 = dispToBase(lastMouseDisp);
     drawMeasureSegment(measureTemp, p2, true);
   }
 }
 
-/* ================= primitivos ================= */
+/* ===== primitivos ===== */
 function drawCircleAt(cx, cy, r, color){
-  ctx.save();
-  ctx.strokeStyle = color || 'rgb(0,1,255)';
-  ctx.lineWidth = 2.6;
-  ctx.setLineDash([8,6]);
+  ctx.save(); ctx.strokeStyle = color || 'rgb(0,1,255)';
+  ctx.lineWidth = 2.6; ctx.setLineDash([8,6]);
   ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
   ctx.setLineDash([]); ctx.restore();
 }
-function drawWedgeAt(cx, cy, r, startDeg, endDeg, colorName, alpha){
-  // Azimute 0° = Norte (para cima), sentido horário.
+function drawWedgeCustom(cx, cy, r, startDeg, endDeg, fill, edge, edgeW){
   const start = (-Math.PI/2) + toRad(startDeg);
   let end = (-Math.PI/2) + toRad(endDeg);
   let delta = end - start; if (delta <= 0) delta += Math.PI*2;
   const segs = Math.max(12, Math.floor(delta/(Math.PI/72)));
-  const fillCol = (colorName==='verde') ? `rgba(0,255,0,${alpha})` : `rgba(255,0,0,${alpha})`;
   ctx.save();
-  ctx.fillStyle = fillCol;
   ctx.beginPath(); ctx.moveTo(cx, cy);
   for (let i=0;i<=segs;i++){
     const t = i/segs; const ang = start + t*delta;
     ctx.lineTo(cx + Math.cos(ang)*r, cy + Math.sin(ang)*r);
   }
-  ctx.closePath(); ctx.fill(); ctx.restore();
+  ctx.closePath();
+  if (fill){ ctx.fillStyle = fill; ctx.fill(); }
+  if (edge){ ctx.lineWidth = edgeW||2; ctx.strokeStyle = edge; ctx.stroke(); }
+  ctx.restore();
 }
 function drawRadialLine(cx, cy, r, deg, stroke='rgba(255,0,0,0.95)', lw=2){
   const ang = (-Math.PI/2) + toRad(deg);
   const vx = Math.cos(ang)*r, vy = Math.sin(ang)*r;
-  ctx.save();
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = lw;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(cx + vx, cy + vy);
-  ctx.stroke();
+  ctx.save(); ctx.strokeStyle = stroke; ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + vx, cy + vy); ctx.stroke();
   ctx.restore();
 }
 function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){
@@ -709,12 +691,12 @@ function drawAzLabelAt(cx, cy, deg, rOut, fillColor='#000000'){
   ctx.textAlign   = (Math.cos(ang) >= 0) ? 'left'  : 'right';
   ctx.textBaseline= (Math.sin(ang) >= 0) ? 'top'   : 'bottom';
   ctx.fillStyle = fillColor;
-  const txt = (Math.round(deg*10)/10).toString();
-  ctx.fillText(`${txt}°`, x+dx, y+dy);
+  const txt = formatAzLabel(deg); // 3 dígitos, sem "°"
+  ctx.fillText(txt, x+dx, y+dy);
   ctx.restore();
 }
 
-/* === primitivos da régua (atualizados: azul escuro + setas) === */
+/* === régua === */
 function drawMeasureSegment(aBase, bBase, preview=false){
   const a = baseToDisp(aBase), b = baseToDisp(bBase);
   const km = lengthKm(aBase, bBase);
@@ -723,64 +705,45 @@ function drawMeasureSegment(aBase, bBase, preview=false){
   const stroke = preview ? MEASURE_PREVIEW : MEASURE_COLOR;
 
   ctx.save();
-  ctx.lineWidth = 2.4;
-  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 2.4; ctx.strokeStyle = stroke;
   if (preview) ctx.setLineDash([6,6]);
 
-  // linha principal
   ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
   ctx.setLineDash([]);
 
-  // setas nas pontas (triângulos preenchidos)
   const ang = Math.atan2(b.y - a.y, b.x - a.x);
-  drawArrowHead(b.x, b.y, ang, 12, stroke);         // ponta B no sentido da linha
-  drawArrowHead(a.x, a.y, ang + Math.PI, 12, stroke); // ponta A no sentido oposto
+  drawArrowHead(b.x, b.y, ang, 12, stroke);
+  drawArrowHead(a.x, a.y, ang + Math.PI, 12, stroke);
 
-  // rótulo (caixa clara + texto preto)
   const label = formatDist(km);
-  const padX=6, padY=4;
-  ctx.font='bold 14px Arial, Helvetica, sans-serif';
-  const tw = ctx.measureText(label).width;
-  const th = 16;
+  const padX=6, padY=4; ctx.font='bold 14px Arial, Helvetica, sans-serif';
+  const tw = ctx.measureText(label).width; const th = 16;
 
-  // desloca um pouco ortogonal à linha
-  const vx = b.x-a.x, vy=b.y-a.y;
-  const len = Math.hypot(vx,vy)||1;
-  const nx = -vy/len, ny = vx/len; // normal
-  const off = 10;
+  const vx = b.x-a.x, vy=b.y-a.y; const len = Math.hypot(vx,vy)||1;
+  const nx = -vy/len, ny = vx/len; const off = 10;
   const lx = mid.x + nx*off, ly = mid.y + ny*off;
 
-  // fundo
   ctx.fillStyle = preview ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.85)';
   roundRect(ctx, lx - tw/2 - padX, ly - th/2 - padY, tw + 2*padX, th + 2*padY, 6);
   ctx.fill();
 
-  // texto
-  ctx.fillStyle = '#000';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle = '#000'; ctx.textAlign='center'; ctx.textBaseline='middle';
   ctx.fillText(label, lx, ly);
-
   ctx.restore();
 }
 
-/* seta triangular preenchida apontando para "angle" */
 function drawArrowHead(x, y, angle, size, fill){
-  const w = size * 0.65;                 // largura da base
-  const bx = x - Math.cos(angle) * size; // ponto base (centro)
+  const w = size * 0.65;
+  const bx = x - Math.cos(angle) * size;
   const by = y - Math.sin(angle) * size;
   const px = Math.cos(angle + Math.PI/2) * (w/2);
   const py = Math.sin(angle + Math.PI/2) * (w/2);
 
-  const p1 = {x, y};                     // ponta
-  const p2 = {x: bx + px, y: by + py};   // base esquerda
-  const p3 = {x: bx - px, y: by - py};   // base direita
-
-  ctx.save();
-  ctx.fillStyle = fill;
+  ctx.save(); ctx.fillStyle = fill;
   ctx.beginPath();
-  ctx.moveTo(p1.x, p1.y);
-  ctx.lineTo(p2.x, p2.y);
-  ctx.lineTo(p3.x, p3.y);
+  ctx.moveTo(x, y);
+  ctx.lineTo(bx + px, by + py);
+  ctx.lineTo(bx - px, by - py);
   ctx.closePath();
   ctx.fill();
   ctx.restore();
@@ -796,21 +759,20 @@ function roundRect(ctx, x, y, w, h, r){
   ctx.closePath();
 }
 
-/* ================= coord helpers ================= */
+/* ===== coord helpers ===== */
 function pointerDisplay(e){ const r = overlay.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 function dispToBase(p){ return { x: p.x/scale, y: p.y/scale }; }
 function baseToDisp(p){ return { x: p.x*scale, y: p.y*scale }; }
 function drawMark(x,y){ ctx.save(); ctx.fillStyle='rgba(255,255,0,0.9)'; ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=1.1; ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.restore(); }
-function resetCalcs(){ metersPerBasePx=null; tempPtsBase=[]; updateScaleStatus(); const dpr=window.devicePixelRatio||1; ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0); sectors225=[]; measures=[]; measureTemp=null; anchorBase=null; showCircle=false; renderSectorList(); renderMeasureList(); }
+function resetCalcs(){ metersPerBasePx=null; tempPtsBase=[]; updateScaleStatus(); const dpr=window.devicePixelRatio||1; ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,overlay.width,overlay.height); ctx.setTransform(dpr,0,0,dpr,0,0); sectors225=[]; measures=[]; measureTemp=null; anchorBase=null; showCircle=false; activeProbeIndex=-1; mode=null; renderSectorList(); renderMeasureList(); }
 
-/* ================= raios/conversões ================= */
+/* ===== raios ===== */
 function radiusPxDisp(){ const rBase=(FIXED_RADIUS_KM*1000)/(metersPerBasePx||1); return rBase*scale; }
 
-/* ================= init ================= */
+/* ===== init ===== */
 adjustLogScroll();
 renderSectorList();
 renderMeasureList();
 </script>
 </body>
 </html>
-
